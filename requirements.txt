@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+torch
+torchvision
+tqdm
+pickle5
+statsmodels
+scikit-learn
+adjusttext

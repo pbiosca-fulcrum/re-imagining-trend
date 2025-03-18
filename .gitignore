@@ -1,0 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment directories (adjust if needed)
+trend-venv/
+venv/
+.env
+
+prompt.txt
+combined_python_files.txt
+prompt_chatgpt.py
