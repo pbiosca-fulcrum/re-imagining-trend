@@ -25,6 +25,11 @@ PROCESSED_DATA_DIR = get_dir(op.join(DATA_DIR, "processed_data"))
 STOCKS_SAVEPATH = os.path.join(DATA_DIR, "stocks_dataset")
 RAW_DATA_DIR = op.join(STOCKS_SAVEPATH, "raw_data")
 
+print(f"DATA_DIR: {DATA_DIR}")
+print(f"PROCESSED_DATA_DIR: {PROCESSED_DATA_DIR}")
+print(f"STOCKS_SAVEPATH: {STOCKS_SAVEPATH}")
+print(f"RAW_DATA_DIR: {RAW_DATA_DIR}")
+
 CACHE_DIR = Path("../CACHE_DIR")
 PORTFOLIO = Path("../CACHE_DIR/PORTFOLIO")
 if not os.path.isdir(PORTFOLIO):
