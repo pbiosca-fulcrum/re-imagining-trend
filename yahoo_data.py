@@ -3,18 +3,22 @@ import os
 import time
 import yfinance as yf
 import pandas as pd
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # Define date range
 START_DATE = "1993-01-01"
 END_DATE = "2025-12-31"
 
-# Directory paths for raw and processed data
+# Directory paths for raw, processed data and plots
 BASE_DIR = os.path.join("data", "stocks_dataset")
 RAW_DATA_DIR = os.path.join(BASE_DIR, "raw_data")
 PROCESSED_DATA_DIR = os.path.join(BASE_DIR, "processed_data")
+PLOTS_DIR = os.path.join(BASE_DIR, "plots")
+
 os.makedirs(RAW_DATA_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
+os.makedirs(PLOTS_DIR, exist_ok=True)
 
 def load_ticker_marketcap(filename="ticker_marketcap.csv"):
     """
@@ -197,6 +201,28 @@ def save_processed_data(ticker, df):
     df.to_feather(processed_feather)
     print(f"Processed data for {ticker} saved to:\n  CSV: {processed_csv}\n  Feather: {processed_feather}")
 
+def plot_stock_return(ticker, df):
+    """
+    Computes cumulative return from daily returns and stores a plot of the stock return.
+    """
+    # Ensure dataframe is sorted by date.
+    df_sorted = df.sort_values(by="Date")
+    # Compute cumulative return based on the daily return.
+    df_sorted["CumulativeReturn"] = (1 + df_sorted["Ret"]).cumprod() - 1
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(df_sorted["Date"], df_sorted["CumulativeReturn"], label=f'{ticker} Cumulative Return')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Return')
+    plt.title(f'Cumulative Stock Return for {ticker}')
+    plt.legend()
+    plt.grid(True)
+    
+    plot_file = os.path.join(PLOTS_DIR, f"{ticker}_cumulative_return.png")
+    plt.savefig(plot_file)
+    plt.close()
+    print(f"Plot for {ticker} saved to {plot_file}.")
+
 def main():
     tickers, marketcap_mapping = load_ticker_marketcap()  # Load tickers and market cap from one file.
     for ticker in tqdm(tickers, desc="Downloading stocks", unit="ticker"):
@@ -206,12 +232,13 @@ def main():
             processed_df = process_stock_data(ticker, raw_df, marketcap_mapping)
             if processed_df is not None:
                 save_processed_data(ticker, processed_df)
+                plot_stock_return(ticker, processed_df)
             else:
                 print(f"Skipping processing for {ticker} due to data issues.")
         else:
             print(f"Skipping processing for {ticker} due to missing data.")
-        # Sleep for 2 seconds between tickers.
-        time.sleep(2)
+        # Sleep for 0.1 seconds between tickers. 
+        time.sleep(0.1) 
 
 if __name__ == "__main__":
     main()
