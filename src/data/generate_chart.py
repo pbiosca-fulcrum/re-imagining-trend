@@ -160,7 +160,7 @@ class GenerateStockData:
 
                 image_label_data = self._generate_daily_features(stock_df, date)
                 if isinstance(image_label_data, dict):
-                    if sample_num < 2:
+                    if sample_num < 10:
                         # Save example image for debugging
                         dbg_dir = ut.get_dir(op.join(self.save_dir, "sample_images"))
                         image_label_data["image"].save(
