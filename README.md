@@ -1,4 +1,4 @@
-# My Trend Project
+# Re-Imagining Trend
 
 This project implements a strategy that trades US stocks based on trend analysis using CNN models. It covers:
 
@@ -56,11 +56,22 @@ my_trend_project/
 
 1. Clone the repository and navigate into it:
    ```bash
-   git clone https://github.com/your_username/my_trend_project.git
-   cd my_trend_project
+   git clone https://github.com/pbiosca-fulcrum/re-imagining-trend.git
+   cd re-imagining-trend
    ```
 
-2. Install the required packages:
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   
+   # On Windows
+   venv\Scripts\activate
+   
+   # On Unix or MacOS
+   source venv/bin/activate
+   ```
+
+3. Install the required packages:
    ```bash
    pip install -r requirements.txt
    ```
