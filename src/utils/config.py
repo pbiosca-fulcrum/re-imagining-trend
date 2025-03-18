@@ -17,7 +17,8 @@ def get_dir(dir_path: str) -> str:
 
 
 # Project structure
-WORK_DIR = get_dir("../WORK_SPACE")
+# WORK_DIR = get_dir("../WORK_SPACE")
+WORK_DIR = get_dir(".")
 EXP_DIR = get_dir(os.path.join(WORK_DIR, "new_model_res"))
 PORTFOLIO_DIR = get_dir(os.path.join(EXP_DIR, "portfolio"))
 LOG_DIR = get_dir(os.path.join(EXP_DIR, "log"))

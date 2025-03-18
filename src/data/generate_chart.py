@@ -9,6 +9,8 @@ in a memory-mapped file. These images can then feed into CNN training.
 - Added more debug logging for shape checks, sample counts, and final memmap sizes.
 - Flush and close memmap to ensure data is truly written.
 - Minor docstring improvements for clarity.
+- [MODIFIED] Introduced `step_size` so we shift by the full return window (self.chart_len) 
+             instead of generating a new chart on every single day.
 """
 
 from typing import Optional, List, Tuple, Union
@@ -36,7 +38,8 @@ class GenerateStockData:
 
     Workflow:
       - For a given year, retrieve stock data from equity_data (real or synthetic).
-      - For each trading date, build an OHLC chunk (self.window_size days).
+      - For each step in that year (stepping by step_size days), build an OHLC chunk of length
+        self.window_size (or self.chart_len if using aggregated bars).
       - Optionally compute moving averages if self.ma_lags is not empty.
       - Adjust price so the first day of the chunk is 1.0, then produce an image.
       - Save the images in a memory-mapped .dat file and the labels (features) in a .feather file.
@@ -53,7 +56,9 @@ class GenerateStockData:
         volume_bar: bool = False,
         need_adjust_price: bool = True,
         allow_tqdm: bool = True,
-        chart_type: str = "bar"
+        chart_type: str = "bar",
+        # NEW: step_size to skip by full return window:
+        step_size: Optional[int] = None
     ) -> None:
         """
         Args:
@@ -67,6 +72,8 @@ class GenerateStockData:
             need_adjust_price (bool): If True, normalizes chart so the first day has close=1.0.
             allow_tqdm (bool): If True, shows progress bars.
             chart_type (str): One of ["bar", "pixel", "centered_pixel"].
+            step_size (Optional[int]): Number of days to skip between generated charts.
+                Defaults to self.chart_len if not provided.
         """
         self.country = country
         self.year = year
@@ -79,6 +86,9 @@ class GenerateStockData:
         self.need_adjust_price = need_adjust_price
         self.allow_tqdm = allow_tqdm
         self.chart_type = chart_type
+
+        # If no explicit step_size, we default to skipping exactly chart_len days
+        self.step_size = step_size if step_size is not None else self.chart_len
 
         # Ret length for storing classification/regression labels
         self.ret_len_list = [5, 20, 60, 65, 180, 250, 260]
@@ -134,10 +144,16 @@ class GenerateStockData:
         )
         for stock_id in iterator:
             stock_df = self.df.xs(stock_id, level=1).copy().reset_index()
+            # Filter to only this year's valid rows
             dates = stock_df[~pd.isna(stock_df["Ret"])].Date
             dates = dates[dates.dt.year == self.year]
+            dates = dates.sort_values()
 
-            for date in dates:
+            # Instead of iterating daily, we skip `self.step_size` days each time
+            date_indices = range(0, len(dates), self.step_size)
+
+            for idx in date_indices:
+                date = dates.iloc[idx]
                 # Expand capacity if needed
                 if sample_num >= capacity:
                     old_cap = capacity
@@ -160,8 +176,8 @@ class GenerateStockData:
 
                 image_label_data = self._generate_daily_features(stock_df, date)
                 if isinstance(image_label_data, dict):
+                    # For debugging: save example images
                     if sample_num < 10:
-                        # Save example image for debugging
                         dbg_dir = ut.get_dir(op.join(self.save_dir, "sample_images"))
                         image_label_data["image"].save(
                             op.join(dbg_dir, f"{self.file_name}_{stock_id}_{date.strftime('%Y%m%d')}.png")
