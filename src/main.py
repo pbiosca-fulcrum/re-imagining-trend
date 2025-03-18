@@ -72,6 +72,9 @@ def main() -> None:
         pf_delay_list=[0],
         lr=1e-4,
     )
+    print(f"CNN2D model training completed.")
+    breakpoint()
+    
     train_us_model(
         ws_list=[20],
         pw_list=[20],
@@ -83,52 +86,57 @@ def main() -> None:
         pf_delay_list=[0],
         lr=1e-4,
     )
-    train_us_model(
-        ws_list=[20],
-        pw_list=[60],
-        total_worker=1,
-        calculate_portfolio=True,
-        ts1d_model=False,
-        ts_scale="image_scale",
-        regression_label=None,
-        pf_delay_list=[0],
-        lr=1e-4,
-    )
+    print(f"CNN2D model training completed.")
+    # train_us_model(
+    #     ws_list=[20],
+    #     pw_list=[60],
+    #     total_worker=1,
+    #     calculate_portfolio=True,
+    #     ts1d_model=False,
+    #     ts_scale="image_scale",
+    #     regression_label=None,
+    #     pf_delay_list=[0],
+    #     lr=1e-4,
+    # )
     # CNN1D
-    train_us_model(
-        ws_list=[20],
-        pw_list=[20],
-        total_worker=1,
-        calculate_portfolio=True,
-        ts1d_model=True,
-        ts_scale="image_scale",
-        regression_label=None,
-        pf_delay_list=[0],
-        lr=1e-4,
-    )
-    # Timescale variations
-    train_us_model(
-        ws_list=[20],
-        pw_list=[20],
-        total_worker=1,
-        calculate_portfolio=True,
-        ts1d_model=False,
-        ts_scale="image_scale",
-        regression_label=None,
-        pf_delay_list=[0],
-        lr=1e-5,
-    )
-    train_us_model(
-        ws_list=[60],
-        pw_list=[60],
-        total_worker=1,
-        calculate_portfolio=True,
-        ts1d_model=False,
-        ts_scale="image_scale",
-        regression_label=None,
-        pf_delay_list=[0],
-        lr=1e-5,
-    )
+    # train_us_model(
+    #     ws_list=[20],
+    #     pw_list=[20],
+    #     total_worker=1,
+    #     calculate_portfolio=True,
+    #     ts1d_model=True,
+    #     ts_scale="image_scale",
+    #     regression_label=None,
+    #     pf_delay_list=[0],
+    #     lr=1e-4,
+    # )
+    # print(f"CNN1D model training completed.")
+    
+    # # Timescale variations
+    # train_us_model(
+    #     ws_list=[20],
+    #     pw_list=[20],
+    #     total_worker=1,
+    #     calculate_portfolio=True,
+    #     ts1d_model=False,
+    #     ts_scale="image_scale",
+    #     regression_label=None,
+    #     pf_delay_list=[0],
+    #     lr=1e-5,
+    # )
+    # print(f"Timescale variations completed.")
+    
+    # train_us_model(
+    #     ws_list=[60],
+    #     pw_list=[60],
+    #     total_worker=1,
+    #     calculate_portfolio=True,
+    #     ts1d_model=False,
+    #     ts_scale="image_scale",
+    #     regression_label=None,
+    #     pf_delay_list=[0],
+    #     lr=1e-5,
+    # )
 
     print("All tasks completed.")
 

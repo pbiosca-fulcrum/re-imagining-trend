@@ -62,13 +62,22 @@ class PortfolioManager:
         return df
 
     def __add_period_ret_to_us_res_df_w_delays(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Merges next_{freq}_ret_{delay} columns onto the existing signal_df
+        from period_ret, but DOES NOT merge 'MarketCap' from period_ret
+        to avoid column conflicts.
+        """
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
-        columns = ["MarketCap"] + [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
+        # Only bring in next_{freq}_ret_{delay} columns (plus custom_ret, if any)
+        columns = [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
         if self.custom_ret:
             columns.append(self.custom_ret)
-        # Merge on Date column
         df_reset = df.reset_index()
-        merged = df_reset.merge(period_ret[["Date"] + columns], on="Date", how="left")
+        merged = df_reset.merge(
+            period_ret[["Date"] + columns],  # No "MarketCap" here
+            on="Date",
+            how="left"
+        )
         merged.dropna(inplace=True)
         return merged.set_index(["Date", "StockID"])
 
@@ -170,7 +179,9 @@ class PortfolioManager:
         summary_df = summary_df.set_index(
             pd.Index(["Low"] + list(range(2, int(cut))) + ["High", "H-L"])
         )
-        summary_df.loc["Turnover", "SR"] = turnover / (1 if self.freq == "month" else 4 if self.freq == "quarter" else 52/12)
+        summary_df.loc["Turnover", "SR"] = turnover / (
+            1 if self.freq == "month" else (4 if self.freq == "quarter" else 52 / 12)
+        )
         return summary_df
 
     def _get_portfolio_name(self, weight_type: str, delay: int, cut: int) -> str:
