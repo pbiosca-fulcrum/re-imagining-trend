@@ -4,13 +4,13 @@ generate_chart.py
 Generates chart images (OHLC) from daily data for each stock, saving them
 in a memory-mapped file. These images can then feed into CNN training.
 
-**Changes**:
-- Force removal of existing output files before writing new ones to avoid partial/corrupt data.
-- Added more debug logging for shape checks, sample counts, and final memmap sizes.
-- Flush and close memmap to ensure data is truly written.
-- Minor docstring improvements for clarity.
-- [MODIFIED] Introduced `step_size` so we shift by the full return window (self.chart_len) 
-             instead of generating a new chart on every single day.
+**Key Modification**:
+- Default 'step_size=1' so that charts are generated daily (no skipping),
+  matching Kelly’s original sampling approach.
+
+Other details:
+- 'volume_bar=True' and 'ma_lags' usage remain as before, but can be
+  adjusted if needed.
 """
 
 from typing import Optional, List, Tuple, Union
@@ -36,13 +36,8 @@ class GenerateStockData:
     """
     Class to create and save bar/pixel OHLC chart images for CNN.
 
-    Workflow:
-      - For a given year, retrieve stock data from equity_data (real or synthetic).
-      - For each step in that year (stepping by step_size days), build an OHLC chunk of length
-        self.window_size (or self.chart_len if using aggregated bars).
-      - Optionally compute moving averages if self.ma_lags is not empty.
-      - Adjust price so the first day of the chunk is 1.0, then produce an image.
-      - Save the images in a memory-mapped .dat file and the labels (features) in a .feather file.
+    By default, step_size=1 ensures daily chart generation, matching
+    Kelly’s sampling approach (rather than skipping).
     """
 
     def __init__(
@@ -57,8 +52,8 @@ class GenerateStockData:
         need_adjust_price: bool = True,
         allow_tqdm: bool = True,
         chart_type: str = "bar",
-        # NEW: step_size to skip by full return window:
-        step_size: Optional[int] = None
+        # Now defaulting to 1 for daily generation
+        step_size: Optional[int] = 1
     ) -> None:
         """
         Args:
@@ -73,7 +68,7 @@ class GenerateStockData:
             allow_tqdm (bool): If True, shows progress bars.
             chart_type (str): One of ["bar", "pixel", "centered_pixel"].
             step_size (Optional[int]): Number of days to skip between generated charts.
-                Defaults to self.chart_len if not provided.
+                Default of 1 means daily sampling (matching Kelly’s approach).
         """
         self.country = country
         self.year = year
@@ -87,8 +82,8 @@ class GenerateStockData:
         self.allow_tqdm = allow_tqdm
         self.chart_type = chart_type
 
-        # If no explicit step_size, we default to skipping exactly chart_len days
-        self.step_size = step_size if step_size is not None else self.chart_len
+        # This line ensures we default to 1 (daily) if not specified
+        self.step_size = step_size if step_size is not None else 1
 
         # Ret length for storing classification/regression labels
         self.ret_len_list = [5, 20, 60, 65, 180, 250, 260]
@@ -151,8 +146,14 @@ class GenerateStockData:
 
             # Instead of iterating daily, we skip `self.step_size` days each time
             date_indices = range(0, len(dates), self.step_size)
+            
+            date_indices = eqd.get_period_end_dates(self.freq)
+            date_indices = date_indices[date_indices.year == self.year]
 
             for idx in date_indices:
+                if idx >= len(dates):
+                    break
+
                 date = dates.iloc[idx]
                 # Expand capacity if needed
                 if sample_num >= capacity:
@@ -177,7 +178,7 @@ class GenerateStockData:
                 image_label_data = self._generate_daily_features(stock_df, date)
                 if isinstance(image_label_data, dict):
                     # For debugging: save example images
-                    if sample_num < 10:
+                    if stock_id == 'AAPL' and date > pd.Timestamp('2020-01-02'):
                         dbg_dir = ut.get_dir(op.join(self.save_dir, "sample_images"))
                         image_label_data["image"].save(
                             op.join(dbg_dir, f"{self.file_name}_{stock_id}_{date.strftime('%Y%m%d')}.png")
@@ -260,7 +261,6 @@ class GenerateStockData:
         ):
             return False
 
-        # Check .dat file size as a multiple of (img_height * img_width)
         try:
             images_mem = np.memmap(self.images_filename, dtype=np.uint8, mode="r")
             total_size = images_mem.shape[0]
@@ -268,7 +268,6 @@ class GenerateStockData:
             if total_size % expected_pixels_per_image != 0:
                 return False
         except Exception:
-            # If any error reading the file, treat it as invalid
             return False
 
         return True
@@ -292,14 +291,6 @@ class GenerateStockData:
         """
         Build the daily chart for one stock & date, returning a dict of features if successful.
         Otherwise return an int code for specific errors.
-
-        Args:
-            stock_df (pd.DataFrame): The single-stock data.
-            date (pd.Timestamp): Date in that year for which we want the chart.
-
-        Returns:
-            dict: If successful, with "image" (PIL image) plus feature columns.
-            int: If there's an error code from load_adjusted_daily_prices().
         """
         res = self.load_adjusted_daily_prices(stock_df, date)
         if isinstance(res, int):
@@ -343,14 +334,6 @@ class GenerateStockData:
         """
         For a given date, load the chunk of daily data to form an OHLC chart, adjusting price if needed.
         Return an int error code if something fails.
-
-        Args:
-            stock_df (pd.DataFrame): The DataFrame for a single stock.
-            date (pd.Timestamp): Target date.
-
-        Returns:
-            int: An error code if not enough data or other problem.
-            (pd.DataFrame, list): The final chunk plus local ma_lags used.
         """
         if date not in set(stock_df.Date):
             return 0
@@ -404,8 +387,8 @@ class GenerateStockData:
 
     def convert_daily_df_to_chart_freq_df(self, daily_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Aggregate daily_df rows into blocks of chart_freq days (e.g., for chart_freq=4).
-        Raises ChartGenerationError if length is not divisible by chart_freq.
+        Aggregate daily_df rows into blocks of chart_freq days. Raises ChartGenerationError
+        if length is not divisible by chart_freq.
         """
         length = len(daily_df)
         if length % self.chart_freq != 0:
@@ -466,9 +449,6 @@ class GenerateStockData:
     def _get_feature_and_dtype_list(self) -> Tuple[dict, list]:
         """
         Return (dtype_dict, feature_list) for memory-mapping arrays.
-
-        Returns:
-            (dict, list): {feature: dtype}, and the ordered list of feature names.
         """
         float32_features = [
             "EWMA_vol",

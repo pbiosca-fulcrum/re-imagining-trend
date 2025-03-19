@@ -5,7 +5,7 @@ Simple utility class to manage pickled data or CSV/feather files in a consistent
 """
 
 import os.path as op
-import pickle5 as pickle
+import pickle as pickle
 import pandas as pd
 
 from src.utils import utilities as ut

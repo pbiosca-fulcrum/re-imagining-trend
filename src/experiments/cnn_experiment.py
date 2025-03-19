@@ -3,6 +3,13 @@ cnn_experiment.py
 
 Defines an Experiment class that manages CNN training, evaluation,
 and the generation of final ensemble results for portfolio usage.
+
+**Key Modifications**:
+- Default 'lr=1e-4' (instead of 1e-5) to match Kelly’s typical setup.
+- Kept 'drop_prob=0.50', 'max_epoch=50', 'early_stop=True', 'batch_norm=True',
+  'lrelu=True', etc. to align with Kelly’s code.
+- The rest remains as before, aside from ensuring we match the
+  step_size approach in generate_chart (already changed).
 """
 
 import copy
@@ -37,12 +44,6 @@ from src.data.dgp_config import FREQ_DICT
 class Experiment:
     """
     Encapsulates the entire train-validate-test pipeline for a CNN-based model.
-
-    Steps:
-      1. Create Datasets from specified in-sample years
-      2. Train and validate the CNN with possible ensemble
-      3. Save or load final ensemble predictions
-      4. Evaluate or build portfolio from predictions
     """
 
     def __init__(
@@ -52,7 +53,8 @@ class Experiment:
         model_obj: cnn_model.Model,
         train_freq: str,
         ensem: int = 5,
-        lr: float = 1e-5,
+        # Changed default lr from 1e-5 to 1e-4 to match Kelly
+        lr: float = 1e-4,
         drop_prob: float = 0.50,
         device_number: int = 0,
         max_epoch: int = 50,
@@ -70,6 +72,7 @@ class Experiment:
         pf_freq=None,
         tensorboard=False,
         weight_decay=0,
+        # Keep cross_entropy by default, or "MSE" if regression_label is set
         loss_name="cross_entropy",
         margin=1,
         train_size_ratio=0.7,
@@ -77,9 +80,6 @@ class Experiment:
         chart_type: str = "bar",
         delayed_ret: int = 0
     ) -> None:
-        """
-        Initialize an Experiment object with specified parameters.
-        """
         self.ws = ws
         self.pw = pw
         self.model_obj = model_obj
@@ -112,7 +112,6 @@ class Experiment:
         self.delayed_ret = delayed_ret
         self.label_dtype = torch.long if model_obj.regression_label is None else torch.float
 
-        # paths
         self.exp_name = self.get_exp_name()
         self.pf_dir = self.get_portfolio_dir()
         model_name = model_obj.name
@@ -121,13 +120,9 @@ class Experiment:
         self.tb_dir = ut.get_dir(os.path.join(self.model_dir, "tensorboard_res"))
         self.oos_metrics_path = os.path.join(self.ensem_res_dir, "oos_metrics_no_delay.pkl")
 
-        # pick the earliest OOS year
-        self.oos_start_year = oos_years[0]
+        self.oos_start_year = self.oos_years[0]
 
     def get_exp_name(self) -> str:
-        """
-        Synthesize an experiment name from the key parameters.
-        """
         name_parts = [
             f"{self.ws}d{self.pw}p-lr{self.lr:.0E}-dp{self.drop_prob:.2f}",
             f"ma{self.has_ma}-vb{self.has_volume_bar}-{self.train_freq}lyTrained"
@@ -170,9 +165,6 @@ class Experiment:
         return "-".join(name_parts)
 
     def get_portfolio_dir(self) -> str:
-        """
-        Construct a path for storing portfolio results.
-        """
         name_list = [self.country]
         if self.model_obj.name not in BENCHMARK_MODEL_NAME_DICT.values():
             name_list.append(self.model_obj.name)
@@ -279,6 +271,7 @@ class Experiment:
         Train a single model, returning the best validation metrics and final train metrics.
         """
         if self.country != "USA" and self.tl is not None:
+            # e.g. load pretrained from 'usa' or do 'ft' logic
             us_model_save_path = model_save_path.replace(f"-{self.country}-{self.tl}", "")
             model_state_dict = torch.load(us_model_save_path, map_location=self.device)["model_state_dict"]
             model = self.model_obj.init_model_with_model_state_dict(model_state_dict, device=self.device)
@@ -299,6 +292,7 @@ class Experiment:
             else:
                 raise ValueError(f"{self.tl} not supported.")
         else:
+            # Normal new model init
             model = self.model_obj.init_model(device=self.device)
             optimizer = optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
@@ -425,9 +419,6 @@ class Experiment:
         return res_dict
 
     def _generate_epoch_stat(self, epoch, learning_rate, num_samples, running_metrics):
-        """
-        Summarize key metrics at the end of an epoch or evaluation pass.
-        """
         TP = running_metrics["TP"]
         TN = running_metrics["TN"]
         FP = running_metrics["FP"]
@@ -448,9 +439,6 @@ class Experiment:
         return out
 
     def _update_running_metrics(self, loss, labels, preds, running_metrics) -> None:
-        """
-        Accumulate batch results into running metrics (loss, accuracy, confusion matrix).
-        """
         running_metrics["running_loss"] += loss.item() * len(labels)
         running_metrics["running_correct"] += torch.sum(preds == labels).item()
         running_metrics["TP"] += torch.sum(preds * labels).item()

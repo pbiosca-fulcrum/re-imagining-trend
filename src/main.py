@@ -33,7 +33,7 @@ def main() -> None:
     torch.set_num_threads(1)
 
     # Generate synthetic bar chart data for a range of years
-    year_list = list(range(1993, 2020))
+    year_list = list(range(1993, 2025))
     chart_type = "bar"
     window_size = 20
     freq = "month"

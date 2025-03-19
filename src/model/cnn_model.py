@@ -2,7 +2,15 @@
 cnn_model.py
 
 Defines a flexible CNN architecture (2D or 1D) for classification/regression tasks.
-Automatically adjusts final layer size for either 64×60 or 77×60 images (if volume_bar=True).
+
+**Key Modifications**:
+- Default arguments for batch_norm=True, xavier=True, lrelu=True,
+  and bn_loc="bn_bf_relu" to match Kelly’s approach.
+- Default drop_prob=0.50 remains, as in Kelly’s code.
+- If you want to do 1D or 2D, you pass `ts1d_model=True/False`.
+
+Other details: 
+- We keep final output = 2 units for classification, or 1 unit for regression_label.
 """
 
 import torch
@@ -11,7 +19,6 @@ import numpy as np
 from torchsummary import summary
 
 from src.utils.config import TRUE_DATA_CNN_INPLANES
-from src.data.dgp_config import IMAGE_HEIGHT, IMAGE_WIDTH, VOLUME_CHART_GAP
 
 
 def init_weights(m: nn.Module) -> None:
@@ -37,26 +44,33 @@ class Model:
     """
     A container that sets up either a 2D or 1D CNN architecture, storing hyperparams,
     and automatically adjusts for volume-bar image height if volume_bar=True.
-
+    
     Attributes:
-        ws (int): The base chart 'window_size' (e.g. 20).
-        layer_number (int): How many conv layers to stack.
-        inplanes (int): Base number of output channels for the first conv block.
-        drop_prob (float): Dropout probability at the end of conv layers.
-        filter_size_list (list): Kernel sizes for each conv layer.
-        stride_list (list): Strides for each conv layer.
-        dilation_list (list): Dilations for each conv layer.
-        max_pooling_list (list): (height, width) pooling factors for each conv layer.
-        batch_norm (bool): Whether to apply BatchNorm after each conv.
-        xavier (bool): If True, apply xavier_uniform_ to weights.
-        lrelu (bool): If True, use LeakyReLU; else standard ReLU.
-        bn_loc (str): (Unused in this simple example. Kept for config.)
-        conv_layer_chanls (list or None): If provided, custom channels per layer. Otherwise auto.
-        regression_label (str or None): If not None, do regression (output=1). Else classification (output=2).
-        ts1d_model (bool): If True, we're building the 1D version of the model (not used here).
-        volume_bar (bool): If True, the chart images have a height offset for volume sub-chart.
+    ws (int): The base chart 'window_size' (e.g. 20).
+    layer_number (int): How many conv layers to stack.
+    inplanes (int): Base number of output channels for the first conv block.
+    drop_prob (float): Dropout probability at the end of conv layers.
+    filter_size_list (list): Kernel sizes for each conv layer.
+    stride_list (list): Strides for each conv layer.
+    dilation_list (list): Dilations for each conv layer.
+    max_pooling_list (list): (height, width) pooling factors for each conv layer.
+    batch_norm (bool): Whether to apply BatchNorm after each conv.
+    xavier (bool): If True, apply xavier_uniform_ to weights.
+    lrelu (bool): If True, use LeakyReLU; else standard ReLU.
+    bn_loc (str): (Unused in this simple example. Kept for config.)
+    conv_layer_chanls (list or None): If provided, custom channels per layer. Otherwise auto.
+    regression_label (str or None): If not None, do regression (output=1). Else classification (output=2).
+    ts1d_model (bool): If True, we're building the 1D version of the model (not used here).
+    volume_bar (bool): If True, the chart images have a height offset for volume sub-chart.
 
+    Key defaults to match Kelly’s typical setup:
+      - batch_norm=True
+      - xavier=True
+      - lrelu=True
+      - bn_loc="bn_bf_relu"
+      - drop_prob=0.5
     """
+
     def __init__(
         self,
         ws: int,
@@ -78,7 +92,7 @@ class Model:
         conv_layer_chanls=None,
         regression_label=None,
         ts1d_model: bool = False,
-        volume_bar: bool = True,
+        volume_bar: bool = True,  # optional for 2D chart images
     ):
         self.ws = ws
         self.layer_number = layer_number
@@ -95,28 +109,45 @@ class Model:
         self.conv_layer_chanls = conv_layer_chanls
         self.regression_label = regression_label
         self.ts1d_model = ts1d_model
-        self.volume_bar = volume_bar  # NEW: we store this for dummy-forward shape.
+        self.volume_bar = volume_bar
 
+        # For 1D vs 2D, we handle differently in init_model
         if self.ts1d_model:
-            # For 1D use-case (unused in your immediate error).
-            self.padding_list = [fs // 2 for fs in self.filter_size_list]
+            # 1D logic: we might handle padding as integer
+            self.padding_list = [fs // 2 if fs else 1 for fs in self.filter_size_list]
         else:
+            # 2D logic: handle (height, width) pairs
             self.padding_list = [
                 (int(fs[0] / 2), int(fs[1] / 2))
                 for fs in self.filter_size_list
                 if fs
             ]
 
+        # Construct a descriptive name
         self.name = self._get_full_model_name()
+
+    def _get_full_model_name(self) -> str:
+        arch = f"D{self.ws}L{self.layer_number}"
+        vb_suffix = "_vb" if self.volume_bar else ""
+        return arch + vb_suffix
 
     def init_model(self, device=None, state_dict=None) -> nn.Module:
         """
         Initialize the PyTorch model object (CNNModel or CNN1DModel).
         """
         if self.ts1d_model:
-            # 1D logic (omitted here).
-            # ...
-            raise NotImplementedError("1D model code not shown here.")
+            model = CNN1DModel(
+                layer_number=self.layer_number,
+                ws=self.ws,
+                inplanes=self.inplanes,
+                drop_prob=self.drop_prob,
+                filter_size_list=self.filter_size_list,
+                stride_list=self.stride_list,
+                padding_list=self.padding_list,
+                dilation_list=self.dilation_list,
+                max_pooling_list=self.max_pooling_list,
+                regression_label=self.regression_label,
+            )
         else:
             model = CNNModel(
                 layer_number=self.layer_number,
@@ -134,7 +165,7 @@ class Model:
                 bn_loc=self.bn_loc,
                 conv_layer_chanls=self.conv_layer_chanls,
                 regression_label=self.regression_label,
-                volume_bar=self.volume_bar,  # <-- pass it in
+                volume_bar=self.volume_bar,
             )
 
         if state_dict is not None:
@@ -153,20 +184,16 @@ class Model:
         model.load_state_dict(model_state_dict)
         return model
 
-    def _get_full_model_name(self) -> str:
-        """
-        Create a descriptive model name string with volume-bar mention if relevant.
-        """
-        arch = f"D{self.ws}L{self.layer_number}"
-        vb_suffix = "_vb" if self.volume_bar else ""
-        return arch + vb_suffix
-
 
 class CNNModel(nn.Module):
     """
-    2D CNN Implementation for image inputs (bar/pixel charts).
-    Automatically computes flatten size by doing a dummy forward using
-    the correct (height, width) for the given ws and volume_bar flag.
+    2D CNN Implementation for chart image inputs (bar/pixel).
+
+    By default:
+     - 'batch_norm=True' means we add BN after conv,
+     - 'lrelu=True' uses LeakyReLU,
+     - 'bn_loc="bn_bf_relu"' as a typical config,
+     - 'xavier=True' calls init_weights on the entire model.
     """
 
     def __init__(
@@ -186,7 +213,7 @@ class CNNModel(nn.Module):
         bn_loc: str,
         conv_layer_chanls,
         regression_label=None,
-        volume_bar: bool = True,  # <-- ADDED
+        volume_bar: bool = True,
     ):
         super().__init__()
         self.layer_number = layer_number
@@ -204,13 +231,10 @@ class CNNModel(nn.Module):
         self.bn_loc = bn_loc
         self.conv_layer_chanls = conv_layer_chanls
         self.regression_label = regression_label
-        self.volume_bar = volume_bar  # store it
+        self.volume_bar = volume_bar
 
-        # Build conv layers
         self.conv_layers = self._init_conv_layers()
-        # Figure out flatten size
-        fc_size = self._get_conv_layers_flatten_size()  # <-- uses volume_bar and ws
-        # Create final FC
+        fc_size = self._get_conv_layers_flatten_size()
         if regression_label:
             self.fc = nn.Linear(fc_size, 1)
         else:
@@ -238,7 +262,7 @@ class CNNModel(nn.Module):
                 st=self.stride_list[i],
                 pad=self.padding_list[i],
                 dil=self.dilation_list[i],
-                mp=self.max_pooling_list[i]
+                mp=self.max_pooling_list[i],
             )
             layers.append(block)
             in_ch = out_ch
@@ -279,20 +303,98 @@ class CNNModel(nn.Module):
         Pass a dummy input of the correct (height, width) into conv_layers
         so we know how many features come out after the last conv block.
 
-        If ws=20 with volume_bar=True, the actual height is 77, else 64, etc.
+        If ws=20 with volume_bar=True, the actual height is 64 + extra for volume, etc.
         """
+        from src.data.dgp_config import IMAGE_HEIGHT, IMAGE_WIDTH, VOLUME_CHART_GAP
+
         base_h = IMAGE_HEIGHT[self.ws]
         if self.volume_bar:
             base_h += int(base_h / 5) + VOLUME_CHART_GAP
 
         base_w = IMAGE_WIDTH[self.ws]
         dummy = torch.rand((1, 1, base_h, base_w))
-
         x = self.conv_layers(dummy)
-        flatten_size = x.shape[1]  # shape is (1, channels, ? , ?) after flatten
-        return flatten_size
+        return x.shape[1]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_layers(x)
+        x = self.fc(x)
+        return x
+
+
+class CNN1DModel(nn.Module):
+    """
+    1D CNN Implementation for time-series usage (O/H/L/C/Vol lines).
+    Typically, shape is (batch, 6, window_size).
+    """
+
+    def __init__(
+        self,
+        layer_number: int,
+        ws: int,
+        inplanes: int,
+        drop_prob: float,
+        filter_size_list,
+        stride_list,
+        padding_list,
+        dilation_list,
+        max_pooling_list,
+        regression_label=None,
+    ):
+        super().__init__()
+        self.layer_number = layer_number
+        self.ws = ws
+        self.inplanes = inplanes
+        self.drop_prob = drop_prob
+        self.filter_size_list = filter_size_list
+        self.stride_list = stride_list
+        self.padding_list = padding_list
+        self.dilation_list = dilation_list
+        self.max_pooling_list = max_pooling_list
+        self.regression_label = regression_label
+
+        self.conv_layers = self._init_ts1d_conv_layers()
+        fc_size = self._get_ts1d_conv_layers_flatten_size()
+
+        if regression_label:
+            self.fc = nn.Linear(fc_size, 1)
+        else:
+            self.fc = nn.Linear(fc_size, 2)
+
+        self.apply(init_weights)
+
+    def _init_ts1d_conv_layers(self) -> nn.Sequential:
+        conv_layer_chanls = [self.inplanes * (2 ** i) for i in range(self.layer_number)]
+        layers = []
+        prev_chanl = 6  # open/high/low/close/ma/vol
+        for i, out_ch in enumerate(conv_layer_chanls):
+            layers.append(
+                nn.Sequential(
+                    nn.Conv1d(
+                        in_channels=prev_chanl,
+                        out_channels=out_ch,
+                        kernel_size=self.filter_size_list[i],
+                        stride=self.stride_list[i],
+                        padding=self.padding_list[i],
+                        dilation=self.dilation_list[i],
+                    ),
+                    nn.BatchNorm1d(out_ch),
+                    nn.LeakyReLU(),
+                    nn.MaxPool1d(self.max_pooling_list[i], ceil_mode=True),
+                )
+            )
+            prev_chanl = out_ch
+
+        layers.append(Flatten())
+        layers.append(nn.Dropout(p=self.drop_prob))
+        return nn.Sequential(*layers)
+
+    def _get_ts1d_conv_layers_flatten_size(self):
+        dummy_input = torch.rand((1, 6, self.ws))
+        x = self.conv_layers(dummy_input)
+        return x.shape[1]
+
+    def forward(self, x):
         x = self.conv_layers(x)
         x = self.fc(x)
         return x

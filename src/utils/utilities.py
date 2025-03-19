@@ -9,7 +9,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-import pickle5 as pickle
+import pickle as pickle
 
 
 two_sided_tstat_threshold_dict = {0.1: 1.645, 0.05: 1.96, 0.01: 2.575}
