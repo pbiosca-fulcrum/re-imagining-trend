@@ -78,6 +78,18 @@ def processed_us_data() -> pd.DataFrame:
     )
     print(f"Finished reading data in {(time.time() - since):.2f} sec")
     df = process_raw_data_helper(df)
+    
+    # --- New code: Save period returns as parquet files in CACHE_DIR ---
+    for freq in ["week", "month", "quarter"]:
+        col = f"Ret_{freq}"
+        if col in df.columns:
+            ret_df = df[df[col].notna()][[col]].reset_index()
+            new_name = f"next_{freq}_ret"
+            ret_df = ret_df.rename(columns={col: new_name})
+            ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_ret.pq")
+            ret_df.to_parquet(ret_pq_path, index=False)
+            print(f"Saved period returns for {freq} to {ret_pq_path}")
+    # ---------------------------------------------------------------------
 
     # Save to feather for faster reload next time
     df.reset_index().to_feather(processed_us_data_path)
@@ -169,9 +181,9 @@ def get_spy_freq_rets(freq: str) -> pd.DataFrame:
     """
     assert freq in ["week", "month", "quarter", "year"]
     file_path = str(dcf.CACHE_DIR / f"spy_{freq}_ret.csv")
-
+    print(f"DEBUG: In get_spy_freq_rets, looking for file: {file_path}")
     if not op.isfile(file_path):
-        print(f"File {file_path} not found. Generating synthetic SPY {freq} returns (this is separate from equity data).")
+        print(f"DEBUG: File {file_path} not found. Generating synthetic SPY {freq} returns (this is separate from equity data).")
         start_date = pd.Timestamp("1993-01-01")
         end_date = pd.Timestamp("2019-12-31")
         if freq == "week":
@@ -182,7 +194,6 @@ def get_spy_freq_rets(freq: str) -> pd.DataFrame:
             dates = pd.date_range(start=start_date, end=end_date, freq="Q")
         else:  # year
             dates = pd.date_range(start=start_date, end=end_date, freq="A-DEC")
-
         np.random.seed(42)
         mean_return = 0.002
         volatility = 0.02
@@ -193,11 +204,16 @@ def get_spy_freq_rets(freq: str) -> pd.DataFrame:
         }
         spy = pd.DataFrame(data)
         spy.to_csv(file_path, index=False)
+        print(f"DEBUG: Synthetic SPY returns generated. Head:\n{spy.head()}")
     else:
         spy = pd.read_csv(file_path, parse_dates=["date"])
-
+        print(f"DEBUG: Found SPY returns file. Head:\n{spy.head()}")
+        # Print the full path to this file
+        print(f"DEBUG: Full path to SPY returns file: {op.abspath(file_path)}")
     spy.rename(columns={"date": "Date"}, inplace=True)
     spy.set_index("Date", inplace=True)
+    print("DEBUG: Returning SPY returns with index (first 5):\n", spy.index[:5])
+    breakpoint()
     return spy
 
 
@@ -209,7 +225,6 @@ def get_period_end_dates(period: str) -> pd.DatetimeIndex:
     spy = get_spy_freq_rets(period)
     return spy.index
 
-
 def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     """
     Load the period returns for a country. Currently only supporting "USA".
@@ -218,19 +233,22 @@ def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     assert country == "USA"
     assert period in ["week", "month", "quarter"]
     period_ret_path = op.join(dcf.CACHE_DIR, f"us_{period}_ret.pq")
+    print(f"DEBUG: In get_period_ret for period '{period}', checking file: {period_ret_path}")
+    breakpoint()
     if not op.isfile(period_ret_path):
-        print(f"No saved {period} data. Using synthetic approach for monthly/quarterly SPY.")
-        spy = get_spy_freq_rets(period)  # returns DataFrame with index as Date, column f"{period}_ret"
-        # Rename the column to match expected naming: next_{period}_ret_0delay
+        print(f"DEBUG: No saved {period} data. Using synthetic approach for monthly/quarterly SPY.")
+        spy = get_spy_freq_rets(period)  # returns DataFrame with index as Date, column f"{freq}_ret"
         spy = spy.rename(columns={f"{period}_ret": f"next_{period}_ret_0delay"})
         # Add a synthetic MarketCap column
         spy["MarketCap"] = 1e9
         # Reset index to have Date as a column
         spy = spy.reset_index()
+        print("DEBUG: Synthetic period returns generated, head:\n", spy.head())
         return spy[["Date", "MarketCap", f"next_{period}_ret_0delay"]]
-
     period_ret = pd.read_parquet(period_ret_path)
     period_ret.reset_index(inplace=True)
+    print("DEBUG: Loaded period returns from file, head:\n", period_ret.head())
+    breakpoint()
     return period_ret
 
 
@@ -262,4 +280,6 @@ def analyze_return_balance() -> None:
 
 
 if __name__ == "__main__":
-    analyze_return_balance()
+    # analyze_return_balance()
+    
+    processed_us_data()
