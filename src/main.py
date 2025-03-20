@@ -85,7 +85,7 @@ def main() -> None:
     #     pf_delay_list=[0],
     #     lr=1e-4,
     # )
-    print(f"CNN2D model training completed.")
+    # print(f"CNN2D model training completed.")
     # train_us_model(
     #     ws_list=[20],
     #     pw_list=[60],

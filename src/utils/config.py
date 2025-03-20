@@ -48,7 +48,7 @@ EMP_CNN1d_BL_SETTING = {
 
 # For splitting sample by year
 IS_YEARS = list(range(1993, 2001))
-OOS_YEARS = list(range(2001, 2020))
+OOS_YEARS = list(range(2001, 2025))
 
 # Benchmark model naming (for referencing in experiment code)
 BENCHMARK_MODEL_NAME_DICT = {

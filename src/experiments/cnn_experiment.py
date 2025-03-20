@@ -469,7 +469,7 @@ class Experiment:
         """
         Load all ensemble models for inference.
         """
-        model_list = [self.model_obj.init_model() for _ in range(self.ensem)]
+        model_list = [self.model_obj.init_model(device=self.device) for _ in range(self.ensem)]
         for i in range(self.ensem):
             ckpt = self.get_model_checkpoint_path(i)
             if not os.path.exists(ckpt):
@@ -477,6 +477,8 @@ class Experiment:
                 return None
             state_dict = torch.load(ckpt, map_location=self.device)["model_state_dict"]
             model_list[i].load_state_dict(state_dict)
+            model_list[i].to(self.device)
+
         return model_list
 
     # -------------------------------------------------------------------------
@@ -531,8 +533,6 @@ class Experiment:
                     for mdl in model_list:
                         mdl.eval()
                         outputs = mdl(inputs)
-                        print(outputs)
-                        breakpoint()
                         probs = nn.Softmax(dim=1)(outputs)
                         total_prob += probs
 
@@ -590,6 +590,10 @@ class Experiment:
 
     def load_oos_ensem_stat(self) -> dict:
         """
+        
+        WHY IS THIS NOT IMPLEMENTED COME ON!!
+        
+        
         Load or compute out-of-sample metrics.
         Returns a dictionary with keys like 'loss', 'accy', 'MCC', 'Spearman', 'Pearson', etc.
         (For demonstration, returns a placeholder dictionary.)
@@ -632,10 +636,14 @@ class Experiment:
             ensem_res_year_list = list(self.is_years) + list(self.oos_years)
         else:
             ensem_res_year_list = list(self.oos_years)
+            
+        print(f"Generating ensemble results for years {ensem_res_year_list}")
 
         self.generate_ensem_res(freq=self.pf_freq, load_saved_data=load_saved_data, year_list=ensem_res_year_list)
+        
+        # Compute these metrics carefully!
         oos_metrics = self.load_oos_ensem_stat()
-        print(oos_metrics)
+        # print(oos_metrics)
 
         if self.delayed_ret != 0:
             delay_list = delay_list + [self.delayed_ret]
