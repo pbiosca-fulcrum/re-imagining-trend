@@ -244,7 +244,7 @@ class Experiment:
             model_save_path = self.get_model_checkpoint_path(model_num)
             if os.path.exists(model_save_path) and pretrained:
                 print(f"Found pretrained model {model_save_path}")
-                validate_metrics = torch.load(model_save_path)
+                validate_metrics = torch.load(model_save_path, map_location=self.device)
             else:
                 dataloaders_dict = self.get_train_validate_dataloaders_dict()
                 train_metrics, validate_metrics, _model = self.train_single_model(

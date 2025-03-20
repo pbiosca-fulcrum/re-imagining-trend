@@ -1,12 +1,8 @@
-"""
-portfolio.py
-
-Implements a portfolio manager that constructs decile portfolios
-based on predicted up_prob or raw regression outputs.
-"""
-
+# portfolio.py
 import os
 import os.path as op
+import pdb
+import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,9 +13,21 @@ from src.data import equity_data as eqd
 
 class PortfolioManager:
     """
-    The PortfolioManager class computes decile portfolios based on a 'signal_df'
-    with columns ['up_prob', 'MarketCap', 'next_{freq}_ret_{delay}delay', ...].
-    It calculates H-L returns, turnover, and saves to disk.
+    Manages the construction of decile portfolios based on an 'up_prob' signal
+    and the subsequent calculation of portfolio returns.
+
+    Attributes:
+        signal_df (pd.DataFrame): A MultiIndex DataFrame with index=[Date, StockID],
+            containing columns "up_prob" and "MarketCap". If load_signal=False,
+            signal_df can be None. The data is typically filtered to start_year..end_year.
+        freq (str): Frequency of rebalancing/returns. One of ["week", "month", "quarter"].
+        portfolio_dir (str): Path to store portfolio results (CSV and summary files).
+        start_year (int): The earliest year to include in the out-of-sample analysis.
+        end_year (int): The latest year to include in the out-of-sample analysis.
+        country (str): Usually "USA", but can be extended to other countries.
+        delay_list (list): A list of integer delays to test. 0 means no delay.
+        custom_ret (str): If not None, use custom column for returns instead of next_{freq}_ret_{delay}.
+        transaction_cost (bool): Whether to apply some transaction cost penalty.
     """
 
     def __init__(
@@ -30,223 +38,447 @@ class PortfolioManager:
         start_year: int = 2001,
         end_year: int = 2019,
         country: str = "USA",
-        delay_list=None,
+        delay_list: list = None,
         load_signal: bool = True,
         custom_ret: str = None,
-        transaction_cost: bool = False,
-    ):
-        assert freq in ["week", "month", "quarter"]
-        print(f"DEBUG: Initializing PortfolioManager with freq={freq}, start_year={start_year}, end_year={end_year}, country={country}")
+        transaction_cost: bool = False
+    ) -> None:
+        """
+        Initialize the PortfolioManager.
+
+        Args:
+            signal_df (pd.DataFrame): If load_signal=True, must be a MultiIndex DataFrame 
+                with [Date, StockID], containing "up_prob" and "MarketCap". 
+            freq (str): Frequency for returns; "week", "month", or "quarter".
+            portfolio_dir (str): Where portfolio CSV and summary results will be saved.
+            start_year (int): Start of the out-of-sample window.
+            end_year (int): End of the out-of-sample window.
+            country (str): Country string, default "USA".
+            delay_list (list): List of integer delays (e.g., [0, 1, 2]).
+            load_signal (bool): If False, we skip reading the signal df. 
+            custom_ret (str): If provided, use that column name for returns.
+            transaction_cost (bool): Apply transaction cost if True.
+        """
+        assert freq in ["week", "month", "quarter"], (
+            f"freq must be one of 'week','month','quarter'; got {freq}"
+        )
         self.freq = freq
         self.portfolio_dir = portfolio_dir
         self.start_year = start_year
         self.end_year = end_year
         self.country = country
-        self.delay_list = delay_list or [0]
-        self.transaction_cost = transaction_cost
+        # For the base case, we handle 0 delay by default.
+        self.delay_list = [0] if delay_list is None else delay_list
         self.custom_ret = custom_ret
-
+        self.transaction_cost = transaction_cost
+        self.no_delay_ret_name = f"next_{freq}_ret"
+        
+        # If we are loading the signal, attach period returns to that DataFrame:
         if load_signal:
-            # ensure columns exist
+            # Must contain "up_prob" and "MarketCap"
             if "up_prob" not in signal_df.columns:
-                raise ValueError("signal_df must have 'up_prob' column.")
-            print("DEBUG: signal_df before __get_up_prob_with_period_ret has shape:", signal_df.shape)
-            self.signal_df = self.__get_up_prob_with_period_ret(signal_df)
-            print("DEBUG: signal_df after __get_up_prob_with_period_ret has shape:", self.signal_df.shape)
+                raise ValueError("signal_df must have an 'up_prob' column if load_signal=True.")
+            self.signal_df = self.get_up_prob_with_period_ret(signal_df)
+        else:
+            self.signal_df = None
 
-    def __get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
-        print("DEBUG: Entering __get_up_prob_with_period_ret")
-        keep_years = range(self.start_year, self.end_year + 1)
-        in_years = signal_df.index.get_level_values("Date").year.isin(keep_years)
-        print("DEBUG: in_years filter created; sample values:", in_years[:5])
-        df = signal_df[in_years].copy()
-        print("DEBUG: DataFrame shape after filtering by year:", df.shape)
-        df = self.__add_period_ret_to_us_res_df_w_delays(df)
-        print("DEBUG: DataFrame shape after merging period returns:", df.shape)
-        if self.country not in ["future", "new_future"]:
-            df["MarketCap"] = df["MarketCap"].abs()
-            print("DEBUG: Converted MarketCap to absolute values")
-            df = df[~df["MarketCap"].isnull()].copy()
-            print("DEBUG: DataFrame shape after dropping null MarketCap:", df.shape)
-        print("DEBUG: Exiting __get_up_prob_with_period_ret")
-        return df
+    def __add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Merges the base period return data for the specified freq with the 'signal_df',
+        adding columns for each delay in delay_list, e.g., next_week_ret_0delay, next_week_ret_1delay, etc.
 
-    def __add_period_ret_to_us_res_df_w_delays(self, df: pd.DataFrame) -> pd.DataFrame:
+        Args:
+            signal_df (pd.DataFrame): Must have an index of [Date, StockID] and columns "up_prob","MarketCap".
+
+        Returns:
+            pd.DataFrame: A copy of signal_df with additional columns for delayed returns.
         """
-        Merges next_{freq}_ret_{delay} columns onto the existing signal_df
-        from period_ret, but DOES NOT merge 'MarketCap' from period_ret
-        to avoid column conflicts.
-        """
-        print("DEBUG: Entering __add_period_ret_to_us_res_df_w_delays")
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
-        print("DEBUG: Retrieved period_ret with columns:", period_ret.columns.tolist())
-        # Only bring in next_{freq}_ret_{delay} columns (plus custom_ret, if any)
-        columns = [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
-        print("DEBUG: Columns to merge:", columns)
-        if self.custom_ret:
+        
+        # Filter for dates after 2000 to ensure we only use recent data
+        # Set multi-index on Date and StockID before filtering
+        if not isinstance(period_ret.index, pd.MultiIndex):
+            period_ret = period_ret.set_index(["Date", "StockID"])
+        
+        # Filter for dates after 2000
+        period_ret = period_ret[period_ret.index.get_level_values("Date").year > 2000]
+        columns = ["MarketCap"] + [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
+        if self.custom_ret is not None:
             columns.append(self.custom_ret)
-            print("DEBUG: Custom return column appended:", self.custom_ret)
-        df_reset = df.reset_index()
-        print("DEBUG: signal_df reset_index shape:", df_reset.shape)
-        merged = df_reset.merge(
-            period_ret[["Date"] + columns],  # No "MarketCap" here
-            on="Date",
-            how="left"
-        )
-        print("DEBUG: Merged dataframe shape after merge:", merged.shape)
-        merged.dropna(inplace=True)
-        print("DEBUG: Merged dataframe shape after dropna:", merged.shape)
-        merged = merged.set_index(["Date", "StockID"])
-        print("DEBUG: Exiting __add_period_ret_to_us_res_df_w_delays")
-        breakpoint()
-        return merged
 
-    def generate_portfolio(self, delay: int = 0, cut: int = 10) -> None:
+        print(f"[DEBUG] Merging signal_df with period_ret columns: {columns}")
+        print(f"[DEBUG] signal_df has {len(signal_df)} samples, period_ret has {len(period_ret)} samples.")
+        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
+        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
+        print(f"[DEBUG] signal_df index: {signal_df.index.names}")
+        print(f"[DEBUG] period_ret index: {period_ret.index.names}")
+        
+        period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
+
+        merged_df = signal_df.join(period_ret[["MC_from_ret", "next_week_ret_0delay"]], how="inner")
+
+        # For convenience, define a base 'no_delay_ret_name' as "next_{freq}_ret_0delay"
+        merged_df[self.no_delay_ret_name] = merged_df[f"next_{self.freq}_ret_0delay"]
+        
+        # Finally, drop rows that are still missing any of these columns
+        merged_df.dropna(subset=columns, inplace=True)
+        merged_df.dropna(subset=[self.no_delay_ret_name], inplace=True)
+
+        # Debug prints
+        for dl in self.delay_list:
+            dl_ret_name = f"next_{self.freq}_ret_{dl}delay"
+            if dl_ret_name not in merged_df.columns:
+                print(f"[DEBUG] Delayed return column {dl_ret_name} not found after merge.")
+            else:
+                nan_count = merged_df[dl_ret_name].isna().sum()
+                zero_count = (merged_df[dl_ret_name] == 0).sum()
+                print(
+                    f"[DEBUG] {len(merged_df)} samples, {dl} delay "
+                    f"nan values={nan_count}, zero values={zero_count}"
+                )
+        return merged_df
+
+    def get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Build a decile-based portfolio for either EW or VW weighting, for a chosen delay.
+        Filters signal_df to the date range [start_year..end_year] and merges period returns.
+
+        Args:
+            signal_df (pd.DataFrame): MultiIndex DataFrame with [Date, StockID].
+
+        Returns:
+            pd.DataFrame: The merged DataFrame containing columns for each delayed return.
         """
-        print("DEBUG: Entering generate_portfolio")
-        print(f"DEBUG: delay={delay}, cut={cut}, delay_list={self.delay_list}")
-        if delay not in self.delay_list:
-            print("DEBUG: delay not in delay_list; exiting generate_portfolio")
-            return
+        filtered_df = signal_df[
+            signal_df.index.get_level_values("Date").year.isin(range(self.start_year, self.end_year + 1))
+        ]
 
-        for weight_type in ["ew", "vw"]:
-            pf_name = self._get_portfolio_name(weight_type, delay, cut)
-            print(f"DEBUG: Calculating portfolio: {pf_name}")
-            pf_ret, turnover = self.__calculate_portfolio_rets(weight_type, cut, delay)
-            print(f"DEBUG: Portfolio returns shape: {pf_ret.shape}, turnover: {turnover}")
-            pf_data_dir = ut.get_dir(op.join(self.portfolio_dir, "pf_data"))
-            out_csv = op.join(pf_data_dir, f"pf_data_{pf_name}.csv")
-            print(f"DEBUG: Saving portfolio data CSV to: {out_csv}")
-            pf_ret.to_csv(out_csv)
+        if filtered_df.empty:
+            print(
+                f"[DEBUG] After date filtering from year {self.start_year} to {self.end_year}, "
+                f"the signal df has {filtered_df.shape[0]} rows (i.e. empty)."
+            )
+            return filtered_df
 
-            summary_df = self.__portfolio_res_summary(pf_ret, turnover, cut)
-            smry_path = os.path.join(self.portfolio_dir, f"{pf_name}.csv")
-            print(f"DEBUG: Saving summary dataframe to: {smry_path}")
-            summary_df.to_csv(smry_path)
-            txt_path = os.path.join(self.portfolio_dir, f"{pf_name}.txt")
-            print(f"DEBUG: Saving latex summary to: {txt_path}")
-            with open(txt_path, "w+") as f:
-                summary_df = summary_df.astype(float).round(2)
-                f.write(ut.to_latex_w_turnover(summary_df, cut))
-        print("DEBUG: Exiting generate_portfolio")
+        final_df = self.__add_period_ret_to_us_res_df_w_delays(filtered_df)
 
-    def __calculate_portfolio_rets(self, weight_type: str, cut: int, delay: int):
-        print("DEBUG: Entering __calculate_portfolio_rets")
-        assert weight_type in ["ew", "vw"]
-        df = self.signal_df.copy()
-        ret_name = self.custom_ret if self.custom_ret else f"next_{self.freq}_ret_{delay}delay"
-        print(f"DEBUG: Using ret_name: {ret_name}")
+        if self.country not in ["future", "new_future"]:
+            final_df["MarketCap"] = final_df["MarketCap"].abs()
+            final_df = final_df[~final_df["MarketCap"].isnull() & (final_df["MarketCap"] > 0)]
+
+        return final_df
+
+    def calculate_portfolio_rets(
+        self,
+        weight_type: str,
+        cut: int = 10,
+        delay: int = 0
+    ) -> (pd.DataFrame, float):
+        """
+        Calculate decile-portfolio returns given a weighting scheme (EW or VW),
+        for a specified delay. Splits stocks into `cut` deciles based on up_prob,
+        then computes returns within each decile.
+
+        Args:
+            weight_type (str): "ew" or "vw" (equal-weight or value-weight).
+            cut (int): Number of deciles (10 by default).
+            delay (int): Must be in self.delay_list. e.g. 0 => no delay, 1 => 1 delay, etc.
+
+        Returns:
+            (portfolio_ret, turnover):
+              portfolio_ret (pd.DataFrame): index=rebalance dates, columns=[decile0..decileN, H-L],
+              turnover (float): average turnover.
+        """
+        assert weight_type in ["ew", "vw"], "weight_type must be either 'ew' or 'vw'."
+        assert delay in self.delay_list, f"delay={delay} not in the allowed list: {self.delay_list}"
+
+        if self.custom_ret:
+            print(f"[DEBUG] Using custom return column={self.custom_ret}")
+            ret_name = self.custom_ret
+        else:
+            ret_name = (
+                self.no_delay_ret_name
+                if delay == 0
+                else f"next_{self.freq}_ret_{delay}delay"
+            )
+
+        df = self.signal_df.copy() if self.signal_df is not None else None
+        if df is None or df.empty:
+            raise ValueError(
+                "[ERROR] No signal data (signal_df is empty or None) after merges and filtering. "
+                "Check date ranges, merges, or if your up_prob CSV has valid data."
+            )
 
         dates = np.sort(np.unique(df.index.get_level_values("Date")))
-        print(f"DEBUG: Unique dates count: {len(dates)}")
+        if len(dates) == 0:
+            raise ValueError(
+                "[ERROR] The final data has no valid Dates. Possibly the date filtering or merges left it empty. "
+                "Cannot compute decile portfolios with zero rows."
+            )
+
+        # Convert numpy.datetime64 objects to pandas Timestamp for display
+        print(
+            f"Calculating portfolio from {pd.Timestamp(dates[0]).date() if len(dates) else 'N/A'}, "
+            f"{pd.Timestamp(dates[1]).date() if len(dates) > 1 else 'N/A'} "
+            f"to {pd.Timestamp(dates[-1]).date() if len(dates) else 'N/A'}"
+        )
+
         turnover = np.zeros(len(dates) - 1)
         portfolio_ret = pd.DataFrame(index=dates, columns=list(range(cut)))
-        print("DEBUG: Initialized portfolio_ret with shape:", portfolio_ret.shape)
 
-        prev_to_df = None
-        for i, date in enumerate(dates):
-            print(f"DEBUG: Processing date: {date}")
-            reb_df = df.loc[date].copy()
-            low = np.percentile(reb_df["up_prob"], 10)
-            high = np.percentile(reb_df["up_prob"], 90)
-            print(f"DEBUG: up_prob percentiles for date {date}: low={low}, high={high}")
-            if low == high:
-                print("DEBUG: low equals high; skipping date", date)
+        prob_ret_corr = []
+        prob_ret_pearson_corr = []
+        prob_inv_ret_corr = []
+        prob_inv_ret_pearson_corr = []
+
+        prev_to_df = None  # For turnover calculation
+
+        def get_decile_df_with_inv_ret(reb_df: pd.DataFrame, decile_idx: int) -> pd.DataFrame:
+            up_prob_series = reb_df["up_prob"]
+            low_quantile = np.percentile(up_prob_series, decile_idx * 100.0 / cut)
+            high_quantile = np.percentile(up_prob_series, (decile_idx + 1) * 100.0 / cut)
+
+            if decile_idx == 0:
+                pf_filter = (up_prob_series >= low_quantile) & (up_prob_series <= high_quantile)
+            else:
+                pf_filter = (up_prob_series > low_quantile) & (up_prob_series <= high_quantile)
+
+            decile_subset = reb_df[pf_filter].copy()
+            if decile_subset.empty:
+                decile_subset["weight"] = 0.0
+                decile_subset["inv_ret"] = 0.0
+                return decile_subset
+
+            if weight_type == "ew":
+                stock_num = len(decile_subset)
+                decile_subset["weight"] = 1.0 / float(stock_num)
+            else:
+                total_value = decile_subset["MarketCap"].sum()
+                decile_subset["weight"] = decile_subset["MarketCap"] / total_value
+
+            decile_subset["inv_ret"] = decile_subset["weight"] * decile_subset[ret_name]
+            return decile_subset
+
+        for i, d in enumerate(dates):
+            rebalance_df = df.loc[d].copy()
+            corr_spearman = ut.rank_corr(rebalance_df, "up_prob", ret_name, method="spearman")
+            corr_pearson = ut.rank_corr(rebalance_df, "up_prob", ret_name, method="pearson")
+            prob_ret_corr.append(corr_spearman)
+            prob_ret_pearson_corr.append(corr_pearson)
+
+            if rebalance_df.empty:
+                portfolio_ret.loc[d] = 0.0
                 continue
+
             for j in range(cut):
-                decile_df = self.__get_decile_df_with_inv_ret(reb_df, j, cut, weight_type, ret_name)
-                inv_ret_sum = np.sum(decile_df["inv_ret"])
-                print(f"DEBUG: Date {date} - Decile {j}: inv_ret sum = {inv_ret_sum}, count = {len(decile_df)}")
-                portfolio_ret.loc[date, j] = inv_ret_sum
+                decile_df = get_decile_df_with_inv_ret(rebalance_df, j)
+                if decile_df.empty:
+                    portfolio_ret.loc[d, j] = 0.0
+                    continue
 
-            sell_decile = self.__get_decile_df_with_inv_ret(reb_df, 0, cut, weight_type, ret_name)
-            buy_decile = self.__get_decile_df_with_inv_ret(reb_df, cut - 1, cut, weight_type, ret_name)
-            print(f"DEBUG: Date {date} - Sell decile count: {len(sell_decile)}, Buy decile count: {len(buy_decile)}")
+                if self.transaction_cost:
+                    pass
 
-            sell_decile[["weight", "inv_ret"]] *= -1
-            to_df = pd.concat([sell_decile, buy_decile])
-            print(f"DEBUG: Date {date} - Combined decile df shape: {to_df.shape}")
+                portfolio_ret.loc[d, j] = decile_df["inv_ret"].sum()
 
+            sell_decile = get_decile_df_with_inv_ret(rebalance_df, 0)
+            buy_decile = get_decile_df_with_inv_ret(rebalance_df, cut - 1)
+            if (not sell_decile.empty) or (not buy_decile.empty):
+                buy_sell_decile = pd.concat([sell_decile, buy_decile])
+                corr_inv_spearman = ut.rank_corr(buy_sell_decile, "up_prob", "inv_ret", method="spearman")
+                corr_inv_pearson = ut.rank_corr(buy_sell_decile, "up_prob", "inv_ret", method="pearson")
+            else:
+                corr_inv_spearman = np.nan
+                corr_inv_pearson = np.nan
+
+            prob_inv_ret_corr.append(corr_inv_spearman)
+            prob_inv_ret_pearson_corr.append(corr_inv_pearson)
+
+            sell_decile[["weight", "inv_ret"]] = sell_decile[["weight", "inv_ret"]] * (-1)
+            to_df = pd.concat([sell_decile, buy_decile]) if not buy_decile.empty else sell_decile
             if i > 0 and prev_to_df is not None:
-                merged_idx = np.unique(list(to_df.index) + list(prev_to_df.index))
-                print(f"DEBUG: Date {date} - Merged index count: {len(merged_idx)}")
-                tto_df = pd.DataFrame(index=merged_idx)
+                all_idx = np.unique(list(to_df.index) + list(prev_to_df.index))
+                tto_df = pd.DataFrame(index=all_idx)
                 tto_df["cur_weight"] = to_df["weight"]
                 tto_df[["prev_weight", "ret", "inv_ret"]] = prev_to_df[["weight", ret_name, "inv_ret"]]
                 tto_df.fillna(0, inplace=True)
-                denom = 1 + np.sum(tto_df["inv_ret"])
-                turnover_val = np.sum((tto_df["cur_weight"] - tto_df["prev_weight"] * (1 + tto_df["ret"]) / denom).abs()) * 0.5
-                print(f"DEBUG: Date {date} - Turnover calculated: {turnover_val}")
-                turnover[i - 1] = turnover_val
 
+                denom = 1.0 + tto_df["inv_ret"].sum()
+                turnover[i - 1] = (tto_df["cur_weight"] - tto_df["prev_weight"] * (1 + tto_df["ret"]) / denom).abs().sum()
+                turnover[i - 1] *= 0.5
             prev_to_df = to_df
 
-        portfolio_ret = portfolio_ret.fillna(0)
+        portfolio_ret = portfolio_ret.fillna(0.0)
         portfolio_ret["H-L"] = portfolio_ret[cut - 1] - portfolio_ret[0]
-        print("DEBUG: Exiting __calculate_portfolio_rets")
-        return portfolio_ret, turnover.mean()
 
-    def __get_decile_df_with_inv_ret(
-        self, reb_df: pd.DataFrame, decile_idx: int, cut: int, weight_type: str, ret_name: str
+        print(f"[DEBUG] Spearman Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_corr):.4f}")
+        print(f"[DEBUG] Pearson Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_pearson_corr):.4f}")
+        print(
+            f"[DEBUG] Spearman Corr (Prob vs. 'inv_ret' in top/bottom decile) = "
+            f"{np.nanmean(prob_inv_ret_corr):.4f}"
+        )
+        print(
+            f"[DEBUG] Pearson Corr (Prob vs. 'inv_ret' in top/bottom decile) = "
+            f"{np.nanmean(prob_inv_ret_pearson_corr):.4f}"
+        )
+
+        return portfolio_ret, np.mean(turnover)
+
+    @staticmethod
+    def _ret_to_cum_log_ret(rets: pd.Series) -> pd.Series:
+        """
+        Convert arithmetic returns to cumulative log returns for plotting.
+
+        Args:
+            rets (pd.Series): Return series, typically daily/weekly/monthly.
+
+        Returns:
+            pd.Series: Cumulative log return over time.
+        """
+        log_rets = np.log(rets.astype(float) + 1.0)
+        return log_rets.cumsum()
+
+    def make_portfolio_plot(
+        self,
+        portfolio_ret: pd.DataFrame,
+        cut: int,
+        weight_type: str,
+        save_path: str,
+        plot_title: str
+    ) -> None:
+        ret_name = "nxt_freq_ewret" if weight_type == "ew" else "nxt_freq_vwret"
+        df = portfolio_ret.copy()
+        df.columns = (
+            ["Low(L)"] + [str(i) for i in range(2, cut)] + ["High(H)", "H-L"]
+        )
+
+        spy = eqd.get_spy_freq_rets(self.freq)
+
+        if ret_name not in spy.columns:
+            print(f"[DEBUG] Could not find {ret_name} in SPY columns => using placeholder 'SPY' naming only.")
+            df["SPY"] = spy[spy.columns[-1]]
+        else:
+            df["SPY"] = spy[ret_name]
+
+        df.dropna(inplace=True)
+
+        log_ret_df = pd.DataFrame(index=df.index)
+        for column in df.columns:
+            log_ret_df[column] = self._ret_to_cum_log_ret(df[column])
+
+        top_col_name, bottom_col_name = ("High(H)", "Low(L)")
+        prev_year = pd.to_datetime(log_ret_df.index[0]).year - 1
+        prev_day = pd.to_datetime(f"{prev_year}-12-31")
+        log_ret_df.loc[prev_day] = [0] * len(log_ret_df.columns)
+        log_ret_df.sort_index(inplace=True)
+
+        log_ret_df = log_ret_df[[top_col_name, bottom_col_name, "H-L", "SPY"]]
+        plot = log_ret_df.plot(lw=1, title=plot_title)
+        plot.legend(loc=2)
+        plt.grid()
+        plt.savefig(save_path)
+        plt.close()
+
+    def portfolio_res_summary(
+        self,
+        portfolio_ret: pd.DataFrame,
+        turnover: float,
+        cut: int = 10
     ) -> pd.DataFrame:
-        print(f"DEBUG: In __get_decile_df_with_inv_ret for decile_idx: {decile_idx} with cut: {cut}")
-        rebalance_up_prob = reb_df["up_prob"]
-        low = np.percentile(rebalance_up_prob, decile_idx * 100.0 / cut)
-        high = np.percentile(rebalance_up_prob, (decile_idx + 1) * 100.0 / cut)
-        print(f"DEBUG: Decile {decile_idx}: low={low}, high={high}")
-        if decile_idx == 0:
-            pf_filter = (rebalance_up_prob >= low) & (rebalance_up_prob <= high)
-        else:
-            pf_filter = (rebalance_up_prob > low) & (rebalance_up_prob <= high)
-        decile_df = reb_df[pf_filter].copy()
-        print(f"DEBUG: Decile {decile_idx}: found {len(decile_df)} records")
-        if weight_type == "ew":
-            decile_df["weight"] = 1.0 / len(decile_df) if len(decile_df) > 0 else 0
-        else:
-            total_mcap = decile_df["MarketCap"].sum()
-            print(f"DEBUG: Decile {decile_idx}: total_mcap = {total_mcap}")
-            decile_df["weight"] = decile_df["MarketCap"] / total_mcap if total_mcap != 0 else 0
-        
-        print(f"DEBUG: ret_name: {ret_name}")
-        print(f"decile_df[ret_name].head(1).values: {decile_df[ret_name].head(30)}")
-        breakpoint()
-        
-        decile_df["inv_ret"] = decile_df["weight"] * decile_df[ret_name]
-        print(f"DEBUG: Decile {decile_idx}: weight sample {decile_df['weight'].head(1).values} and inv_ret sample {decile_df['inv_ret'].head(1).values}")
-        return decile_df
-
-    def __portfolio_res_summary(self, portfolio_ret: pd.DataFrame, turnover: float, cut: int) -> pd.DataFrame:
-        print("DEBUG: Entering __portfolio_res_summary")
         avg = portfolio_ret.mean().to_numpy()
         std = portfolio_ret.std().to_numpy()
-        print("DEBUG: Average returns:", avg)
-        print("DEBUG: Std returns:", std)
-        freq_to_period = {"week": 52, "month": 12, "quarter": 4}
-        period = freq_to_period[self.freq]
         res = np.zeros((cut + 1, 3))
+
+        if self.freq == "week":
+            period = 52
+        elif self.freq == "month":
+            period = 12
+        else:
+            period = 4
+
         res[:, 0] = avg * period
-        res[:, 1] = std * np.sqrt(period)
-        res[:, 2] = res[:, 0] / res[:, 1]
+        res[:, 1] = std * math.sqrt(period)
+        res[:, 2] = res[:, 0] / (res[:, 1] + 1e-12)
 
         summary_df = pd.DataFrame(res, columns=["ret", "std", "SR"])
-        summary_df = summary_df.set_index(
-            pd.Index(["Low"] + list(range(2, int(cut))) + ["High", "H-L"])
-        )
-        summary_df.loc["Turnover", "SR"] = turnover / (
-            1 if self.freq == "month" else (4 if self.freq == "quarter" else 52 / 12)
-        )
-        print("DEBUG: Summary DataFrame:")
+        index_names = ["Low"] + list(map(str, range(2, int(cut)))) + ["High", "H-L"]
+        summary_df = summary_df.set_index(pd.Index(index_names))
+
+        freq_factor = 0.25 if self.freq == "week" else 1 if self.freq == "month" else 3
+        turnover_annualized = turnover / freq_factor
+        summary_df.loc["Turnover", :] = [np.nan, np.nan, turnover_annualized]
+
         print(summary_df)
-        print("DEBUG: Exiting __portfolio_res_summary")
         return summary_df
 
-    def _get_portfolio_name(self, weight_type: str, delay: int, cut: int) -> str:
+    def generate_portfolio(self, cut: int = 10, delay: int = 0) -> None:
+        if self.signal_df is None or self.signal_df.empty:
+            raise ValueError(
+                "signal_df is empty or None. There's no data to generate portfolios. "
+                "Check if your CSV had rows in the date range."
+            )
+        assert delay in self.delay_list, (
+            f"Delay {delay} is not in {self.delay_list}."
+        )
+
+        for weight_type in ["ew", "vw"]:
+            pf_name = self.get_portfolio_name(weight_type, delay, cut)
+            print(f"Calculating portfolio named '{pf_name}' ...")
+
+            portfolio_ret, turnover = self.calculate_portfolio_rets(
+                weight_type=weight_type,
+                cut=cut,
+                delay=delay
+            )
+            
+            data_dir = ut.get_dir(op.join(self.portfolio_dir, "pf_data"))
+            pf_data_path = op.join(data_dir, f"pf_data_{pf_name}.csv")
+            portfolio_ret.to_csv(pf_data_path)
+            
+            summary_df = self.portfolio_res_summary(portfolio_ret, turnover, cut)
+            smry_path = os.path.join(self.portfolio_dir, f"{pf_name}.csv")
+            summary_df.to_csv(smry_path)
+
+            txt_path = os.path.join(self.portfolio_dir, f"{pf_name}.txt")
+            with open(txt_path, "w+") as file:
+                summary_df = summary_df.astype(float).round(2)
+                file.write(ut.to_latex_w_turnover(summary_df, cut=cut))
+
+            print(f"[INFO] Portfolio '{pf_name}' results saved to:\n  - {pf_data_path}\n  - {smry_path}")
+
+    def get_portfolio_name(self, weight_type: str, delay: int, cut: int) -> str:
+        assert weight_type.lower() in ["ew", "vw"]
         delay_prefix = "" if delay == 0 else f"{delay}d_delay_"
         cut_suffix = "" if cut == 10 else f"_{cut}cut"
-        custom_surfix = f"_{self.custom_ret}" if self.custom_ret else ""
+        custom_ret_suffix = f"_{self.custom_ret}" if self.custom_ret else ""
         tc_suffix = "_w_transaction_cost" if self.transaction_cost else ""
-        pf_name = f"{delay_prefix}{weight_type}{cut_suffix}{custom_surfix}{tc_suffix}"
-        print("DEBUG: Computed portfolio name:", pf_name)
+        pf_name = f"{delay_prefix}{weight_type.lower()}{cut_suffix}{custom_ret_suffix}{tc_suffix}"
         return pf_name
+
+    def load_portfolio_ret(self, weight_type: str, cut: int = 10, delay: int = 0) -> pd.DataFrame:
+        pf_name = self.get_portfolio_name(weight_type, delay, cut)
+        data_dir = op.join(self.portfolio_dir, "pf_data")
+
+        pf_path = op.join(data_dir, f"pf_data_{pf_name}.csv")
+        if not op.isfile(pf_path):
+            pf_path = op.join(data_dir, f"pf_data_{pf_name}_100.csv")
+
+        df = pd.read_csv(pf_path, index_col=0)
+        df.index = pd.to_datetime(df.index)
+        return df
+
+    def load_portfolio_summary(self, weight_type: str, cut: int = 10, delay: int = 0) -> pd.DataFrame:
+        pf_name = self.get_portfolio_name(weight_type, delay, cut)
+        smry_path = op.join(self.portfolio_dir, f"{pf_name}.csv")
+        if not op.isfile(smry_path):
+            smry_path = op.join(self.portfolio_dir, f"{pf_name}_100.csv")
+        df = pd.read_csv(smry_path, index_col=0)
+        return df
+
+
+def main():
+    """Example usage (not typically used this way)."""
+    pass
+
+
+if __name__ == "__main__":
+    main()

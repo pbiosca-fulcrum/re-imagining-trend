@@ -48,51 +48,57 @@ def processed_us_data() -> pd.DataFrame:
         df.set_index(["Date", "StockID"], inplace=True)
         df.sort_index(inplace=True)
         print(f"Done loading in {(time.time() - since):.2f} sec")
-        return df.copy()
+        print(f"Data columns: {df.columns}")
+        breakpoint()
+    breakpoint()
+        # return df.copy()
 
-    # If we don't have a saved Feather, we rely on a raw CSV. We will NOT generate synthetic data.
-    raw_us_data_path = op.join(dcf.RAW_DATA_DIR, "us_920101-200731.csv")
-    if not op.exists(raw_us_data_path):
-        raise FileNotFoundError(
-            f"Raw data file not found at '{raw_us_data_path}'. "
-            "Synthetic data generation has been disabled. Please provide real data."
-        )
+    # # If we don't have a saved Feather, we rely on a raw CSV. We will NOT generate synthetic data.
+    # raw_us_data_path = op.join(dcf.RAW_DATA_DIR, "us_920101-200731.csv")
+    # if not op.exists(raw_us_data_path):
+    #     raise FileNotFoundError(
+    #         f"Raw data file not found at '{raw_us_data_path}'. "
+    #         "Synthetic data generation has been disabled. Please provide real data."
+    #     )
 
-    print(f"Reading raw data from {raw_us_data_path}")
-    since = time.time()
-    df = pd.read_csv(
-        raw_us_data_path,
-        parse_dates=["date"],
-        dtype={
-            "PERMNO": str,
-            "BIDLO": np.float64,
-            "ASKHI": np.float64,
-            "PRC": np.float64,
-            "VOL": np.float64,
-            "SHROUT": np.float64,
-            "OPENPRC": np.float64,
-            "RET": object,
-            "EXCHCD": np.float64,
-        },
-        header=0,
-    )
-    print(f"Finished reading data in {(time.time() - since):.2f} sec")
-    df = process_raw_data_helper(df)
+    # print(f"Reading raw data from {raw_us_data_path}")
+    # since = time.time()
+    # df = pd.read_csv(
+    #     raw_us_data_path,
+    #     parse_dates=["date"],
+    #     dtype={
+    #         "PERMNO": str,
+    #         "BIDLO": np.float64,
+    #         "ASKHI": np.float64,
+    #         "PRC": np.float64,
+    #         "VOL": np.float64,
+    #         "SHROUT": np.float64,
+    #         "OPENPRC": np.float64,
+    #         "RET": object,
+    #         "EXCHCD": np.float64,
+    #     },
+    #     header=0,
+    # )
+    # print(f"Finished reading data in {(time.time() - since):.2f} sec")
+    # df = process_raw_data_helper(df)
     
     # --- New code: Save period returns as parquet files in CACHE_DIR ---
     for freq in ["week", "month", "quarter"]:
         col = f"Ret_{freq}"
         if col in df.columns:
-            ret_df = df[df[col].notna()][[col]].reset_index()
-            new_name = f"next_{freq}_ret"
+            # Include MarketCap alongside the return data
+            ret_df = df[df[col].notna()][["MarketCap", col]].reset_index()
+            new_name = f"next_{freq}_ret_0delay"
             ret_df = ret_df.rename(columns={col: new_name})
+            print(f"Columns in period returns for {freq}: {ret_df.columns}")
+            breakpoint()
             ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_ret.pq")
             ret_df.to_parquet(ret_pq_path, index=False)
             print(f"Saved period returns for {freq} to {ret_pq_path}")
     # ---------------------------------------------------------------------
 
     # Save to feather for faster reload next time
-    df.reset_index().to_feather(processed_us_data_path)
+    # df.reset_index().to_feather(processed_us_data_path)
     return df.copy()
 
 
@@ -213,7 +219,6 @@ def get_spy_freq_rets(freq: str) -> pd.DataFrame:
     spy.rename(columns={"date": "Date"}, inplace=True)
     spy.set_index("Date", inplace=True)
     print("DEBUG: Returning SPY returns with index (first 5):\n", spy.index[:5])
-    breakpoint()
     return spy
 
 
@@ -234,7 +239,6 @@ def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     assert period in ["week", "month", "quarter"]
     period_ret_path = op.join(dcf.CACHE_DIR, f"us_{period}_ret.pq")
     print(f"DEBUG: In get_period_ret for period '{period}', checking file: {period_ret_path}")
-    breakpoint()
     if not op.isfile(period_ret_path):
         print(f"DEBUG: No saved {period} data. Using synthetic approach for monthly/quarterly SPY.")
         spy = get_spy_freq_rets(period)  # returns DataFrame with index as Date, column f"{freq}_ret"
@@ -248,7 +252,6 @@ def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     period_ret = pd.read_parquet(period_ret_path)
     period_ret.reset_index(inplace=True)
     print("DEBUG: Loaded period returns from file, head:\n", period_ret.head())
-    breakpoint()
     return period_ret
 
 
@@ -276,7 +279,6 @@ def analyze_return_balance() -> None:
         print(f"Zero returns: {zero_count} ({zero_count/total*100:.2f}%)")
     
     print("\nReturn balance analysis complete. Breaking for inspection.")
-    breakpoint()
 
 
 if __name__ == "__main__":
