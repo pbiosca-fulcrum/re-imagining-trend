@@ -35,8 +35,8 @@ def main() -> None:
     # Generate synthetic bar chart data for a range of years
     year_list = list(range(1993, 2025))
     chart_type = "bar"
-    window_size = 20
-    freq = "month"
+    window_size = 5
+    freq = "week"
     ma_lags = [window_size]
     volume_bar = True
 
@@ -62,8 +62,8 @@ def main() -> None:
     # Train CNN models (U.S. example)
     # CNN2D
     train_us_model(
-        ws_list=[20],
-        pw_list=[20],
+        ws_list=[5],
+        pw_list=[5],
         total_worker=1,
         calculate_portfolio=True,
         ts1d_model=False,
@@ -74,17 +74,17 @@ def main() -> None:
     )
     print(f"CNN2D model training completed.")
     
-    train_us_model(
-        ws_list=[20],
-        pw_list=[20],
-        total_worker=1,
-        calculate_portfolio=True,
-        ts1d_model=False,
-        ts_scale="image_scale",
-        regression_label=None,
-        pf_delay_list=[0],
-        lr=1e-4,
-    )
+    # train_us_model(
+    #     ws_list=[20],
+    #     pw_list=[20],
+    #     total_worker=1,
+    #     calculate_portfolio=True,
+    #     ts1d_model=False,
+    #     ts_scale="image_scale",
+    #     regression_label=None,
+    #     pf_delay_list=[0],
+    #     lr=1e-4,
+    # )
     print(f"CNN2D model training completed.")
     # train_us_model(
     #     ws_list=[20],

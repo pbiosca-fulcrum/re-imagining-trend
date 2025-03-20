@@ -150,11 +150,13 @@ class GenerateStockData:
             date_indices = eqd.get_period_end_dates(self.freq)
             date_indices = date_indices[date_indices.year == self.year]
 
-            for idx in date_indices:
-                if idx >= len(dates):
-                    break
-
-                date = dates.iloc[idx]
+            for dt in date_indices:
+                if dt not in dates.values:
+                    print(f"[DEBUG] GenerateChart - save_annual_data | Missing date {dt} for {stock_id}")
+                    continue
+                
+                date = dt
+                
                 # Expand capacity if needed
                 if sample_num >= capacity:
                     old_cap = capacity
@@ -178,11 +180,11 @@ class GenerateStockData:
                 image_label_data = self._generate_daily_features(stock_df, date)
                 if isinstance(image_label_data, dict):
                     # Debug: print out returns and classification labels for buy/sell
-                    print(f"[DEBUG] Ticker {stock_id} on {date.strftime('%Y-%m-%d')}:")
-                    for ret in ["Ret"] + [f"Ret_{i}d" for i in self.ret_len_list]:
-                        ret_val = image_label_data.get(ret, "NA")
-                        label_val = image_label_data.get(f"{ret}_label", "NA")
-                        print(f"   {ret} = {ret_val}, {ret}_label = {label_val}")
+                    # print(f"[DEBUG] Ticker {stock_id} on {date.strftime('%Y-%m-%d')}:")
+                    # for ret in ["Ret"] + [f"Ret_{i}d" for i in self.ret_len_list]:
+                    #     ret_val = image_label_data.get(ret, "NA")
+                    #     label_val = image_label_data.get(f"{ret}_label", "NA")
+                    #     print(f"   {ret} = {ret_val}, {ret}_label = {label_val}")
 
                     # For debugging: save example images
                     if stock_id == 'AAPL' and date > pd.Timestamp('2020-01-02'):

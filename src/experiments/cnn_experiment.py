@@ -328,7 +328,7 @@ class Experiment:
                     with torch.set_grad_enabled(phase == "train"):
                         outputs = model(inputs)
                         loss = self.loss_from_model_output(labels, outputs)
-                        _, preds = torch.max(outputs, 1)
+                        xx, preds = torch.max(outputs, 1)
                         if phase == "train":
                             optimizer.zero_grad()
                             loss.backward()
@@ -531,6 +531,8 @@ class Experiment:
                     for mdl in model_list:
                         mdl.eval()
                         outputs = mdl(inputs)
+                        print(outputs)
+                        breakpoint()
                         probs = nn.Softmax(dim=1)(outputs)
                         total_prob += probs
 

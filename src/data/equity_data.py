@@ -1,4 +1,5 @@
 # src/data/equity_data.py
+# src/data/equity_data.py
 
 """
 equity_data.py
@@ -35,10 +36,9 @@ def processed_us_data() -> pd.DataFrame:
     """
     Main function to load the processed U.S. stock dataset with columns like:
         [Date, StockID, Open, High, Low, Close, Vol, Shares, Ret, MarketCap, ...]
-
-    By default, it expects a file called 'us_920101-200731.csv' in the RAW_DATA_DIR
+    By default, it expects a file called 'us_ret.feather' in the PROCESSED_DATA_DIR
     containing real data. If that file is missing, the code raises an error (synthetic
-    generation is now disabled).
+    data generation is now disabled).
     """
     processed_us_data_path = op.join(dcf.PROCESSED_DATA_DIR, "us_ret.feather")
     if op.exists(processed_us_data_path):
@@ -170,7 +170,7 @@ def get_spy_freq_rets(freq: str) -> pd.DataFrame:
     assert freq in ["week", "month", "quarter", "year"]
     file_path = str(dcf.CACHE_DIR / f"spy_{freq}_ret.csv")
 
-    if not os.path.isfile(file_path):
+    if not op.isfile(file_path):
         print(f"File {file_path} not found. Generating synthetic SPY {freq} returns (this is separate from equity data).")
         start_date = pd.Timestamp("1993-01-01")
         end_date = pd.Timestamp("2019-12-31")
@@ -232,3 +232,34 @@ def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     period_ret = pd.read_parquet(period_ret_path)
     period_ret.reset_index(inplace=True)
     return period_ret
+
+
+# --- Added analysis code for return balance ---
+def analyze_return_balance() -> None:
+    """
+    Analyze the balance of returns in the processed US data for multi-day windows (R5, R20, R60).
+    It prints the count of positive, negative, and zero returns, as well as percentages.
+    """
+    df = processed_us_data()
+    windows = [5, 20, 60, 250]
+    for window in windows:
+        col = f"Ret_{window}d"
+        if col not in df.columns:
+            print(f"Column {col} not found in processed data.")
+            continue
+        total = df.shape[0]
+        pos_count = (df[col] > 0).sum()
+        neg_count = (df[col] < 0).sum()
+        zero_count = (df[col] == 0).sum()
+        print(f"\nAnalysis for {col}:")
+        print(f"Total records: {total}")
+        print(f"Positive returns: {pos_count} ({pos_count/total*100:.2f}%)")
+        print(f"Negative returns: {neg_count} ({neg_count/total*100:.2f}%)")
+        print(f"Zero returns: {zero_count} ({zero_count/total*100:.2f}%)")
+    
+    print("\nReturn balance analysis complete. Breaking for inspection.")
+    breakpoint()
+
+
+if __name__ == "__main__":
+    analyze_return_balance()

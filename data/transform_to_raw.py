@@ -93,8 +93,8 @@ def main():
 
         # Accumulate
         all_rows.append(df)
-        # Only process the first 20 files that have data from 1993
-        # if len(all_rows) == 20:
+        # # Only process the first 20 files that have data from 1993
+        # if len(all_rows) == 50:
         #     print("Processed first 20 valid files with data from 1993.")
         #     print(f"all_rows contains {len(all_rows)} DataFrames and is {all_rows}.")
         #     break
