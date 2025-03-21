@@ -1,4 +1,4 @@
-# portfolio.py
+# src/portfolio/portfolio.py
 import os
 import os.path as op
 import pdb
@@ -10,26 +10,11 @@ import matplotlib.pyplot as plt
 from src.utils import utilities as ut
 from src.data import equity_data as eqd
 
-
 class PortfolioManager:
     """
     Manages the construction of decile portfolios based on an 'up_prob' signal
     and the subsequent calculation of portfolio returns.
-
-    Attributes:
-        signal_df (pd.DataFrame): A MultiIndex DataFrame with index=[Date, StockID],
-            containing columns "up_prob" and "MarketCap". If load_signal=False,
-            signal_df can be None. The data is typically filtered to start_year..end_year.
-        freq (str): Frequency of rebalancing/returns. One of ["week", "month", "quarter"].
-        portfolio_dir (str): Path to store portfolio results (CSV and summary files).
-        start_year (int): The earliest year to include in the out-of-sample analysis.
-        end_year (int): The latest year to include in the out-of-sample analysis.
-        country (str): Usually "USA", but can be extended to other countries.
-        delay_list (list): A list of integer delays to test. 0 means no delay.
-        custom_ret (str): If not None, use custom column for returns instead of next_{freq}_ret_{delay}.
-        transaction_cost (bool): Whether to apply some transaction cost penalty.
     """
-
     def __init__(
         self,
         signal_df: pd.DataFrame,
@@ -43,22 +28,6 @@ class PortfolioManager:
         custom_ret: str = None,
         transaction_cost: bool = False
     ) -> None:
-        """
-        Initialize the PortfolioManager.
-
-        Args:
-            signal_df (pd.DataFrame): If load_signal=True, must be a MultiIndex DataFrame 
-                with [Date, StockID], containing "up_prob" and "MarketCap". 
-            freq (str): Frequency for returns; "week", "month", or "quarter".
-            portfolio_dir (str): Where portfolio CSV and summary results will be saved.
-            start_year (int): Start of the out-of-sample window.
-            end_year (int): End of the out-of-sample window.
-            country (str): Country string, default "USA".
-            delay_list (list): List of integer delays (e.g., [0, 1, 2]).
-            load_signal (bool): If False, we skip reading the signal df. 
-            custom_ret (str): If provided, use that column name for returns.
-            transaction_cost (bool): Apply transaction cost if True.
-        """
         assert freq in ["week", "month", "quarter"], (
             f"freq must be one of 'week','month','quarter'; got {freq}"
         )
@@ -83,20 +52,9 @@ class PortfolioManager:
             self.signal_df = None
 
     def __add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Merges the base period return data for the specified freq with the 'signal_df',
-        adding columns for each delay in delay_list, e.g., next_week_ret_0delay, next_week_ret_1delay, etc.
-
-        Args:
-            signal_df (pd.DataFrame): Must have an index of [Date, StockID] and columns "up_prob","MarketCap".
-
-        Returns:
-            pd.DataFrame: A copy of signal_df with additional columns for delayed returns.
-        """
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
         
-        # Filter for dates after 2000 to ensure we only use recent data
-        # Set multi-index on Date and StockID before filtering
+        # Ensure period_ret has a MultiIndex of [Date, StockID]
         if not isinstance(period_ret.index, pd.MultiIndex):
             period_ret = period_ret.set_index(["Date", "StockID"])
         
@@ -117,14 +75,14 @@ class PortfolioManager:
 
         merged_df = signal_df.join(period_ret[["MC_from_ret", "next_week_ret_0delay"]], how="inner")
 
-        # For convenience, define a base 'no_delay_ret_name' as "next_{freq}_ret_0delay"
+        # For convenience, define a base 'no_delay_ret_name'
         merged_df[self.no_delay_ret_name] = merged_df[f"next_{self.freq}_ret_0delay"]
         
         # Finally, drop rows that are still missing any of these columns
         merged_df.dropna(subset=columns, inplace=True)
         merged_df.dropna(subset=[self.no_delay_ret_name], inplace=True)
 
-        # Debug prints
+        # Debug prints for each delay
         for dl in self.delay_list:
             dl_ret_name = f"next_{self.freq}_ret_{dl}delay"
             if dl_ret_name not in merged_df.columns:
@@ -139,17 +97,10 @@ class PortfolioManager:
         return merged_df
 
     def get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Filters signal_df to the date range [start_year..end_year] and merges period returns.
-
-        Args:
-            signal_df (pd.DataFrame): MultiIndex DataFrame with [Date, StockID].
-
-        Returns:
-            pd.DataFrame: The merged DataFrame containing columns for each delayed return.
-        """
         filtered_df = signal_df[
-            signal_df.index.get_level_values("Date").year.isin(range(self.start_year, self.end_year + 1))
+            signal_df.index.get_level_values("Date").year.isin(
+                range(self.start_year, self.end_year + 1)
+            )
         ]
 
         if filtered_df.empty:
@@ -173,21 +124,6 @@ class PortfolioManager:
         cut: int = 10,
         delay: int = 0
     ) -> (pd.DataFrame, float):
-        """
-        Calculate decile-portfolio returns given a weighting scheme (EW or VW),
-        for a specified delay. Splits stocks into `cut` deciles based on up_prob,
-        then computes returns within each decile.
-
-        Args:
-            weight_type (str): "ew" or "vw" (equal-weight or value-weight).
-            cut (int): Number of deciles (10 by default).
-            delay (int): Must be in self.delay_list. e.g. 0 => no delay, 1 => 1 delay, etc.
-
-        Returns:
-            (portfolio_ret, turnover):
-              portfolio_ret (pd.DataFrame): index=rebalance dates, columns=[decile0..decileN, H-L],
-              turnover (float): average turnover.
-        """
         assert weight_type in ["ew", "vw"], "weight_type must be either 'ew' or 'vw'."
         assert delay in self.delay_list, f"delay={delay} not in the allowed list: {self.delay_list}"
 
@@ -215,7 +151,6 @@ class PortfolioManager:
                 "Cannot compute decile portfolios with zero rows."
             )
 
-        # Convert numpy.datetime64 objects to pandas Timestamp for display
         print(
             f"Calculating portfolio from {pd.Timestamp(dates[0]).date() if len(dates) else 'N/A'}, "
             f"{pd.Timestamp(dates[1]).date() if len(dates) > 1 else 'N/A'} "
@@ -313,27 +248,16 @@ class PortfolioManager:
         print(f"[DEBUG] Spearman Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_corr):.4f}")
         print(f"[DEBUG] Pearson Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_pearson_corr):.4f}")
         print(
-            f"[DEBUG] Spearman Corr (Prob vs. 'inv_ret' in top/bottom decile) = "
-            f"{np.nanmean(prob_inv_ret_corr):.4f}"
+            f"[DEBUG] Spearman Corr (Prob vs. 'inv_ret' in top/bottom decile) = {np.nanmean(prob_inv_ret_corr):.4f}"
         )
         print(
-            f"[DEBUG] Pearson Corr (Prob vs. 'inv_ret' in top/bottom decile) = "
-            f"{np.nanmean(prob_inv_ret_pearson_corr):.4f}"
+            f"[DEBUG] Pearson Corr (Prob vs. 'inv_ret' in top/bottom decile) = {np.nanmean(prob_inv_ret_pearson_corr):.4f}"
         )
 
         return portfolio_ret, np.mean(turnover)
 
     @staticmethod
     def _ret_to_cum_log_ret(rets: pd.Series) -> pd.Series:
-        """
-        Convert arithmetic returns to cumulative log returns for plotting.
-
-        Args:
-            rets (pd.Series): Return series, typically daily/weekly/monthly.
-
-        Returns:
-            pd.Series: Cumulative log return over time.
-        """
         log_rets = np.log(rets.astype(float) + 1.0)
         return log_rets.cumsum()
 
@@ -437,13 +361,29 @@ class PortfolioManager:
             summary_df = self.portfolio_res_summary(portfolio_ret, turnover, cut)
             smry_path = os.path.join(self.portfolio_dir, f"{pf_name}.csv")
             summary_df.to_csv(smry_path)
-
+            
             txt_path = os.path.join(self.portfolio_dir, f"{pf_name}.txt")
             with open(txt_path, "w+") as file:
                 summary_df = summary_df.astype(float).round(2)
                 file.write(ut.to_latex_w_turnover(summary_df, cut=cut))
-
+            
             print(f"[INFO] Portfolio '{pf_name}' results saved to:\n  - {pf_data_path}\n  - {smry_path}")
+            
+            # --- New Functionality: Generate Plots ---
+            # Import the plotting module (assumed to be at src/portfolio/plot_portfolio_performance.py)
+            from src.portfolio import plot_portfolio_performance as ppp
+            plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
+            print(f"[INFO] Generating cumulative returns plots for portfolio '{pf_name}'...")
+            # This function will create a plot for each year in the portfolio returns DataFrame
+            ppp.plot_all_years_cumulative_returns(portfolio_ret, plots_dir, weight_type)
+            print(f"[INFO] Cumulative returns plots saved in {plots_dir}")
+            
+            # --- New Functionality: Assess Annual Performance ---
+            print(f"[INFO] Assessing annual performance for portfolio '{pf_name}'...")
+            annual_perf = ppp.assess_yearly_performance(portfolio_ret)
+            annual_perf_path = os.path.join(self.portfolio_dir, f"{pf_name}_annual_performance.csv")
+            annual_perf.to_csv(annual_perf_path)
+            print(f"[INFO] Annual performance metrics saved to {annual_perf_path}")
 
     def get_portfolio_name(self, weight_type: str, delay: int, cut: int) -> str:
         assert weight_type.lower() in ["ew", "vw"]
@@ -461,7 +401,6 @@ class PortfolioManager:
         pf_path = op.join(data_dir, f"pf_data_{pf_name}.csv")
         if not op.isfile(pf_path):
             pf_path = op.join(data_dir, f"pf_data_{pf_name}_100.csv")
-
         df = pd.read_csv(pf_path, index_col=0)
         df.index = pd.to_datetime(df.index)
         return df
@@ -474,11 +413,9 @@ class PortfolioManager:
         df = pd.read_csv(smry_path, index_col=0)
         return df
 
-
 def main():
     """Example usage (not typically used this way)."""
     pass
-
 
 if __name__ == "__main__":
     main()
