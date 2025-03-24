@@ -177,7 +177,7 @@ class PortfolioManager:
             else:
                 pf_filter = (up_prob_series > low_quantile) & (up_prob_series <= high_quantile)
 
-            decile_subset = reb_df[pf_filter].copy()
+            decile_subset = rebalance_df[pf_filter].copy()
             if decile_subset.empty:
                 decile_subset["weight"] = 0.0
                 decile_subset["inv_ret"] = 0.0
@@ -269,8 +269,18 @@ class PortfolioManager:
         save_path: str,
         plot_title: str
     ) -> None:
+        """
+        Generate a plot of cumulative returns. In this version, the columns are renamed so that
+        the decile 0 portfolio is labeled "Low(L)", decile 9 is labeled "High(H)", and the H-L (difference)
+        is labeled "H-L". Then, each line is plotted with a custom colour:
+            - "Low(L)" (decile 0) in red,
+            - "High(H)" (decile 9) in green,
+            - "H-L" in blue,
+            - and any other (here, "SPY") in gray.
+        """
         ret_name = "nxt_freq_ewret" if weight_type == "ew" else "nxt_freq_vwret"
         df = portfolio_ret.copy()
+        # Rename columns for clarity:
         df.columns = (
             ["Low(L)"] + [str(i) for i in range(2, cut)] + ["High(H)", "H-L"]
         )
@@ -285,19 +295,38 @@ class PortfolioManager:
 
         df.dropna(inplace=True)
 
+        # Compute cumulative returns as log-cumulative returns
         log_ret_df = pd.DataFrame(index=df.index)
         for column in df.columns:
             log_ret_df[column] = self._ret_to_cum_log_ret(df[column])
-
+        
+        # Insert a starting point for previous year's end if needed
         top_col_name, bottom_col_name = ("High(H)", "Low(L)")
         prev_year = pd.to_datetime(log_ret_df.index[0]).year - 1
         prev_day = pd.to_datetime(f"{prev_year}-12-31")
         log_ret_df.loc[prev_day] = [0] * len(log_ret_df.columns)
         log_ret_df.sort_index(inplace=True)
 
-        log_ret_df = log_ret_df[[top_col_name, bottom_col_name, "H-L", "SPY"]]
-        plot = log_ret_df.plot(lw=1, title=plot_title)
-        plot.legend(loc=2)
+        # Select only the key columns to plot
+        # Here we plot: "Low(L)", "High(H)", "H-L" and "SPY"
+        plot_cols = ["Low(L)", "High(H)", "H-L", "SPY"]
+        log_ret_df = log_ret_df[plot_cols]
+        
+        # Define custom colours for each column:
+        custom_colors = {
+            "Low(L)": "darkred",   # decile 0 in red
+            "High(H)": "darkgreen",# decile 9 in green
+            "H-L": "darkblue",     # H-L in blue
+            "SPY": "gray"      # SPY in gray
+        }
+        
+        plt.figure(figsize=(10, 6))
+        for col in plot_cols:
+            plt.plot(log_ret_df.index, log_ret_df[col], label=col, color=custom_colors.get(col, "gray"), lw=1)
+        plt.xlabel("Date")
+        plt.ylabel("Cumulative Return")
+        plt.title(plot_title)
+        plt.legend(loc=2)
         plt.grid()
         plt.savefig(save_path)
         plt.close()
@@ -370,13 +399,23 @@ class PortfolioManager:
             print(f"[INFO] Portfolio '{pf_name}' results saved to:\n  - {pf_data_path}\n  - {smry_path}")
             
             # --- New Functionality: Generate Plots ---
-            # Import the plotting module (assumed to be at src/portfolio/plot_portfolio_performance.py)
             from src.portfolio import plot_portfolio_performance as ppp
             plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
             print(f"[INFO] Generating cumulative returns plots for portfolio '{pf_name}'...")
-            # This function will create a plot for each year in the portfolio returns DataFrame
+            # Generate individual yearly plots
             ppp.plot_all_years_cumulative_returns(portfolio_ret, plots_dir, weight_type)
-            print(f"[INFO] Cumulative returns plots saved in {plots_dir}")
+            print(f"[INFO] Cumulative returns yearly plots saved in {plots_dir}")
+            
+            # Generate combined plot for all years with collapse shading
+            combined_plot_path = os.path.join(plots_dir, f"combined_cumulative_returns_{pf_name}.png")
+            # Define collapse periods (adjust these dates as needed)
+            collapse_periods = [
+                (pd.Timestamp("2007-10-01"), pd.Timestamp("2009-03-01"), "GFC"),
+                (pd.Timestamp("2020-02-20"), pd.Timestamp("2020-03-23"), "COVID")
+            ]
+            ppp.plot_all_returns_with_shading(portfolio_ret, combined_plot_path, collapse_periods,
+                                               title=f"Combined Cumulative Returns ({weight_type.upper()})")
+            print(f"[INFO] Combined cumulative returns plot with shaded collapse periods saved at {combined_plot_path}")
             
             # --- New Functionality: Assess Annual Performance ---
             print(f"[INFO] Assessing annual performance for portfolio '{pf_name}'...")

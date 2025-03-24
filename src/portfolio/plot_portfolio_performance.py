@@ -1,3 +1,4 @@
+# src/portfolio/plot_portfolio_performance.py
 """
 plot_portfolio_performance.py
 
@@ -10,6 +11,8 @@ Functions:
     plot_yearly_cumulative_returns: Plots and saves cumulative return curves for a given year.
     plot_all_years_cumulative_returns: Iterates through all years in the DataFrame to plot each year.
     assess_yearly_performance: Computes annual performance metrics for each portfolio.
+    plot_all_returns_with_shading: Plots cumulative returns for all years in one plot with shaded
+                                     regions for market collapse periods.
 """
 
 import os
@@ -46,7 +49,7 @@ def plot_yearly_cumulative_returns(portfolio_ret: pd.DataFrame, save_dir: str, w
     # - Decile 0 (lowest) in red.
     # - Decile 9 (highest) in green.
     # - H-L in blue.
-    # All other deciles are plotted in gray.
+    # All other decile curves are plotted in gray.
     custom_colors = {}
     for col in cum_returns.columns:
         col_str = str(col).strip()
@@ -61,7 +64,7 @@ def plot_yearly_cumulative_returns(portfolio_ret: pd.DataFrame, save_dir: str, w
 
     plt.figure(figsize=(10, 6))
     for col in cum_returns.columns:
-        plt.plot(cum_returns.index, cum_returns[col], label=col, color=custom_colors[col])
+        plt.plot(cum_returns.index, cum_returns[col], label=col, color=custom_colors[col], lw=1)
     plt.xlabel("Date")
     plt.ylabel("Cumulative Return")
     plt.title(f"Cumulative Returns for {year} ({weight_type.upper()})")
@@ -129,3 +132,43 @@ def assess_yearly_performance(portfolio_ret: pd.DataFrame, risk_free_rate: float
     performance_df = pd.concat(results, axis=0)
     performance_df.index.names = ['Year', 'Portfolio']
     return performance_df
+
+
+def plot_all_returns_with_shading(portfolio_ret: pd.DataFrame, save_path: str, 
+                                    collapse_periods: list, title: str = "Cumulative Returns (2001-2024)") -> None:
+    """
+    Plot cumulative returns for all years in one plot and add shaded regions for market collapse periods.
+    
+    Parameters:
+        portfolio_ret (pd.DataFrame): DataFrame with datetime index covering the full period (e.g., 2001-2024)
+                                      and columns representing portfolio returns.
+        save_path (str): File path where the plot will be saved.
+        collapse_periods (list): A list of tuples (start_date, end_date, label) indicating periods to shade.
+                                 For example: [(pd.Timestamp("2007-10-01"), pd.Timestamp("2009-03-01"), "GFC"),
+                                               (pd.Timestamp("2020-02-20"), pd.Timestamp("2020-03-23"), "COVID")].
+        title (str): Title of the plot.
+    """
+    # Compute cumulative returns across the full period
+    cum_returns = (1 + portfolio_ret).cumprod() - 1
+
+    plt.figure(figsize=(12, 8))
+    for col in cum_returns.columns:
+        plt.plot(cum_returns.index, cum_returns[col], label=col, lw=1)
+
+    # To avoid duplicate labels in the legend, track which collapse labels have been added
+    added_labels = set()
+    for start, end, label in collapse_periods:
+        # Only add the label once in the legend
+        lbl = label if label not in added_labels else None
+        plt.axvspan(start, end, color='gray', alpha=0.3, label=lbl)
+        if label is not None:
+            added_labels.add(label)
+
+    plt.xlabel("Date")
+    plt.ylabel("Cumulative Return")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Saved cumulative returns plot with shaded collapse periods to {save_path}")
