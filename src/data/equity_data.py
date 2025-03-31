@@ -50,37 +50,36 @@ def processed_us_data() -> pd.DataFrame:
         print(f"Done loading in {(time.time() - since):.2f} sec")
         print(f"Data columns: {df.columns}")
         breakpoint()
-    breakpoint()
         # return df.copy()
 
-    # # If we don't have a saved Feather, we rely on a raw CSV. We will NOT generate synthetic data.
-    # raw_us_data_path = op.join(dcf.RAW_DATA_DIR, "us_920101-200731.csv")
-    # if not op.exists(raw_us_data_path):
-    #     raise FileNotFoundError(
-    #         f"Raw data file not found at '{raw_us_data_path}'. "
-    #         "Synthetic data generation has been disabled. Please provide real data."
-    #     )
+    # If we don't have a saved Feather, we rely on a raw CSV. We will NOT generate synthetic data.
+    raw_us_data_path = op.join(dcf.RAW_DATA_DIR, "crsp_a_stock.csv")
+    if not op.exists(raw_us_data_path):
+        raise FileNotFoundError(
+            f"Raw data file not found at '{raw_us_data_path}'. "
+            "Synthetic data generation has been disabled. Please provide real data."
+        )
 
-    # print(f"Reading raw data from {raw_us_data_path}")
-    # since = time.time()
-    # df = pd.read_csv(
-    #     raw_us_data_path,
-    #     parse_dates=["date"],
-    #     dtype={
-    #         "PERMNO": str,
-    #         "BIDLO": np.float64,
-    #         "ASKHI": np.float64,
-    #         "PRC": np.float64,
-    #         "VOL": np.float64,
-    #         "SHROUT": np.float64,
-    #         "OPENPRC": np.float64,
-    #         "RET": object,
-    #         "EXCHCD": np.float64,
-    #     },
-    #     header=0,
-    # )
-    # print(f"Finished reading data in {(time.time() - since):.2f} sec")
-    # df = process_raw_data_helper(df)
+    print(f"Reading raw data from {raw_us_data_path}")
+    since = time.time()
+    df = pd.read_csv(
+        raw_us_data_path,
+        parse_dates=["date"],
+        dtype={
+            "PERMNO": str,
+            "BIDLO": np.float64,
+            "ASKHI": np.float64,
+            "PRC": np.float64,
+            "VOL": np.float64,
+            "SHROUT": np.float64,
+            "OPENPRC": np.float64,
+            "RET": object,
+            "EXCHCD": np.float64,
+        },
+        header=0,
+    )
+    print(f"Finished reading data in {(time.time() - since):.2f} sec")
+    df = process_raw_data_helper(df)
     
     # --- New code: Save period returns as parquet files in CACHE_DIR ---
     for freq in ["week", "month", "quarter"]:
@@ -92,7 +91,7 @@ def processed_us_data() -> pd.DataFrame:
             ret_df = ret_df.rename(columns={col: new_name})
             print(f"Columns in period returns for {freq}: {ret_df.columns}")
             breakpoint()
-            ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_ret.pq")
+            ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_crsp_ret.pq")
             ret_df.to_parquet(ret_pq_path, index=False)
             print(f"Saved period returns for {freq} to {ret_pq_path}")
     # ---------------------------------------------------------------------
@@ -138,7 +137,16 @@ def process_raw_data_helper(df: pd.DataFrame) -> pd.DataFrame:
         "Open": {0: np.nan},
         "High": {0: np.nan},
         "Low": {0: np.nan},
-        "Ret": {"C": np.nan, "B": np.nan, "A": np.nan, ".": np.nan},
+        "Ret": {
+            "C": np.nan,
+            "B": np.nan,
+            "A": np.nan,
+            ".": np.nan,
+            -66.0: np.nan,
+            -77.0: np.nan,
+            -88.0: np.nan,
+            -99.0: np.nan
+        },
         "Vol": {0: np.nan, (-99): np.nan},
     })
 
@@ -237,7 +245,7 @@ def get_period_ret(period: str, country: str = "USA") -> pd.DataFrame:
     """
     assert country == "USA"
     assert period in ["week", "month", "quarter"]
-    period_ret_path = op.join(dcf.CACHE_DIR, f"us_{period}_ret.pq")
+    period_ret_path = op.join(dcf.CACHE_DIR, f"us_{period}_crsp_ret.pq")
     print(f"DEBUG: In get_period_ret for period '{period}', checking file: {period_ret_path}")
     if not op.isfile(period_ret_path):
         print(f"DEBUG: No saved {period} data. Using synthetic approach for monthly/quarterly SPY.")
