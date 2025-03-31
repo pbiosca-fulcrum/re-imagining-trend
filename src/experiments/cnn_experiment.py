@@ -570,6 +570,10 @@ class Experiment:
         df_list = []
         for y in year_list:
             csv_path = os.path.join(self.ensem_res_dir, f"ensem{self.ensem}_res_{y}_{freq}.csv")
+            csv_path.replace("_True_", "_[5]_")
+            
+            print(f"Loading ensemble results from {csv_path}")
+            breakpoint()
             if not os.path.exists(csv_path):
                 print(f"No ensemble results found at {csv_path} - skipping.")
                 continue
