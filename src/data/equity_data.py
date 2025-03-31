@@ -49,7 +49,6 @@ def processed_us_data() -> pd.DataFrame:
         df.sort_index(inplace=True)
         print(f"Done loading in {(time.time() - since):.2f} sec")
         print(f"Data columns: {df.columns}")
-        breakpoint()
         # return df.copy()
 
     # If we don't have a saved Feather, we rely on a raw CSV. We will NOT generate synthetic data.
@@ -90,7 +89,6 @@ def processed_us_data() -> pd.DataFrame:
             new_name = f"next_{freq}_ret_0delay"
             ret_df = ret_df.rename(columns={col: new_name})
             print(f"Columns in period returns for {freq}: {ret_df.columns}")
-            breakpoint()
             ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_crsp_ret.pq")
             ret_df.to_parquet(ret_pq_path, index=False)
             print(f"Saved period returns for {freq} to {ret_pq_path}")
