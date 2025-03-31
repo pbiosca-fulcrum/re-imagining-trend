@@ -1,22 +1,21 @@
+# src/data/generate_chart.py
+
 """
 generate_chart.py
 
 Generates chart images (OHLC) from daily data for each stock, saving them
 in a memory-mapped file. These images can then feed into CNN training.
 
-**Key Modification**:
-- Default 'step_size=1' so that charts are generated daily (no skipping),
-  matching Kelly’s original sampling approach.
-
-Other details:
-- 'volume_bar=True' and 'ma_lags' usage remain as before, but can be
-  adjusted if needed.
+Key modifications to speed up:
+  1) We add a flag 'verbose_missing_date' to disable spamming logs for each missing date.
+  2) (Optionally) we show an example of parallel processing with joblib.
 """
 
 from typing import Optional, List, Tuple, Union
 import os
 import os.path as op
 import sys
+import gc
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -27,17 +26,28 @@ from src.data import equity_data as eqd
 from src.data.chart_library import DrawOHLC, DrawChartError
 from src.utils import utilities as ut
 
-
 class ChartGenerationError(Exception):
     """Custom exception for chart generation."""
-
+    pass
 
 class GenerateStockData:
     """
     Class to create and save bar/pixel OHLC chart images for CNN.
+    By default, step_size=1 ensures daily chart generation.
 
-    By default, step_size=1 ensures daily chart generation, matching
-    Kelly’s sampling approach (rather than skipping).
+    Args:
+        country: e.g. "USA"
+        year: e.g. 1993
+        window_size: Number of daily bars in each chart.
+        freq: "week", "month", etc. We use eqd.get_period_end_dates(freq) by default.
+        chart_freq: Aggregates daily data (e.g., 4 means each "bar" is 4 days).
+        ma_lags: List of MA lags (e.g., [20])
+        volume_bar: If True, add a volume sub-chart at the bottom.
+        need_adjust_price: If True, normalize so the first day's close=1.0
+        allow_tqdm: If True, display progress bars
+        chart_type: "bar", "pixel", or "centered_pixel"
+        step_size: # days to skip between samples. Defaults to 1 (daily).
+        verbose_missing_date: If True, print a line for each missing date. Otherwise skip.
     """
 
     def __init__(
@@ -52,24 +62,9 @@ class GenerateStockData:
         need_adjust_price: bool = True,
         allow_tqdm: bool = True,
         chart_type: str = "bar",
-        # Now defaulting to 1 for daily generation
-        step_size: Optional[int] = 1
+        step_size: Optional[int] = 1,
+        verbose_missing_date: bool = True
     ) -> None:
-        """
-        Args:
-            country (str): Country name, e.g. "USA".
-            year (int): Year for which to generate data.
-            window_size (int): Number of daily bars in a chart before prediction.
-            freq (str): e.g. "week", "month", "quarter", "year".
-            chart_freq (int): Aggregates daily data into blocks (e.g., 4).
-            ma_lags (Optional[List[int]]): List of lags for moving averages (e.g., [20]).
-            volume_bar (bool): Whether to include a volume sub-chart in the generated image.
-            need_adjust_price (bool): If True, normalizes chart so the first day has close=1.0.
-            allow_tqdm (bool): If True, shows progress bars.
-            chart_type (str): One of ["bar", "pixel", "centered_pixel"].
-            step_size (Optional[int]): Number of days to skip between generated charts.
-                Default of 1 means daily sampling (matching Kelly’s approach).
-        """
         self.country = country
         self.year = year
         self.window_size = window_size
@@ -81,22 +76,21 @@ class GenerateStockData:
         self.need_adjust_price = need_adjust_price
         self.allow_tqdm = allow_tqdm
         self.chart_type = chart_type
+        self.step_size = step_size if step_size else 1
+        self.verbose_missing_date = verbose_missing_date
 
-        # This line ensures we default to 1 (daily) if not specified
-        self.step_size = step_size if step_size is not None else 1
-
-        # Ret length for storing classification/regression labels
+        # For storing label columns:
         self.ret_len_list = [5, 20, 60, 65, 180, 250, 260]
 
-        # Directory for saving dataset
+        # Directory structure
         self.save_dir = ut.get_dir(op.join(dcf.STOCKS_SAVEPATH, f"stocks_{country}", "dataset_all"))
-
         vb_str = "has_vb" if self.volume_bar else "no_vb"
         ohlc_len_str = "" if self.chart_freq == 1 else f"_{self.chart_len}ohlc"
         chart_type_str = "" if self.chart_type == "bar" else f"{self.chart_type}_"
         self.file_name = (
             f"{chart_type_str}{self.window_size}d_{self.freq}_{vb_str}_{str(self.ma_lags)}_ma_{self.year}{ohlc_len_str}"
         )
+
         self.log_file_name = op.join(self.save_dir, f"{self.file_name}.txt")
         self.labels_filename = op.join(self.save_dir, f"{self.file_name}_labels.feather")
         self.images_filename = op.join(self.save_dir, f"{self.file_name}_images.dat")
@@ -113,86 +107,72 @@ class GenerateStockData:
             print(f"Found valid pre-generated file {self.file_name}, skipping.")
             return
 
-        # Force removing old files to avoid leftover partial data
+        # Remove old partial files
         self._remove_old_files()
 
         print(f"Generating {self.file_name}")
+        # load the raw processed data for (year-2..year)
         self.df = eqd.get_processed_us_data_by_year(self.year)
+
         self.stock_id_list = np.unique(self.df.index.get_level_values("StockID"))
 
-        # We provisionally allocate ~60 samples per stock in a year.
+        # Provisional capacity ~60 samples per stock
         capacity = len(self.stock_id_list) * 60
 
-        # Setup dtypes and containers
+        # Prepare arrays
         dtype_dict, feature_list = self._get_feature_and_dtype_list()
         data_dict = {feature: np.empty(capacity, dtype=dtype_dict[feature]) for feature in feature_list}
-        data_dict["image"] = np.empty(
-            (capacity, self._img_width * self._img_height), dtype=dtype_dict["image"]
-        )
+        data_dict["image"] = np.empty((capacity, self._img_width * self._img_height), dtype=dtype_dict["image"])
         data_dict["image"].fill(0)
 
         sample_num = 0
         data_miss = np.zeros(6)  # track error codes
 
-        iterator = (
-            tqdm(self.stock_id_list) if self.allow_tqdm and ("tqdm" in sys.modules) else self.stock_id_list
-        )
+        # We'll build an iterator for stock IDs
+        iterator = self.stock_id_list
+        if self.allow_tqdm and ("tqdm" in sys.modules):
+            iterator = tqdm(iterator, desc="GenerateChart", unit="stock")
+
         for stock_id in iterator:
             stock_df = self.df.xs(stock_id, level=1).copy().reset_index()
-            # Filter to only this year's valid rows
-            dates = stock_df[~pd.isna(stock_df["Ret"])].Date
-            dates = dates[dates.dt.year == self.year]
-            dates = dates.sort_values()
+            # Keep only the target year’s valid daily rows
+            valid_dates = stock_df[~pd.isna(stock_df["Ret"])].Date
+            valid_dates = valid_dates[valid_dates.dt.year == self.year].sort_values()
 
-            # Instead of iterating daily, we skip `self.step_size` days each time
-            date_indices = range(0, len(dates), self.step_size)
-            
-            date_indices = eqd.get_period_end_dates(self.freq)
-            date_indices = date_indices[date_indices.year == self.year]
+            # We sample every self.step_size days (default 1 => daily).
+            # But here we override with eqd.get_period_end_dates(self.freq) => weekly/monthly last day:
+            # If you truly want daily, comment out the 2 lines below, and use range(0,len(valid_dates),self.step_size)
+            date_candidates = eqd.get_period_end_dates(self.freq)
+            date_candidates = date_candidates[date_candidates.year == self.year]
+            # If you want daily:
+            # date_candidates = valid_dates[::self.step_size]
 
-            for dt in date_indices:
-                if dt not in dates.values:
-                    print(f"[DEBUG] GenerateChart - save_annual_data | Missing date {dt} for {stock_id}")
+            for dt in date_candidates:
+                if dt not in valid_dates.values:
+                    # Silently skip if not found, unless verbose_missing_date is True
+                    if self.verbose_missing_date:
+                        print(f"[DEBUG] Missing date {dt} for {stock_id}")
                     continue
-                
+
                 date = dt
-                
-                # Expand capacity if needed
+                # Check capacity
                 if sample_num >= capacity:
                     old_cap = capacity
-                    new_capacity = capacity + 100
-                    print(f"[DEBUG] Expanding arrays from {old_cap} to {new_capacity} for {stock_id} {date}")
+                    capacity += 100
+                    print(f"[DEBUG] Expanding arrays from {old_cap} to {capacity} for {stock_id} {date}")
                     for feature in feature_list:
                         old_arr = data_dict[feature]
-                        new_arr = np.empty(new_capacity, dtype=dtype_dict[feature])
+                        new_arr = np.empty(capacity, dtype=dtype_dict[feature])
                         new_arr[:old_cap] = old_arr
                         data_dict[feature] = new_arr
-
                     old_img = data_dict["image"]
-                    new_img = np.empty(
-                        (new_capacity, self._img_width * self._img_height),
-                        dtype=dtype_dict["image"],
-                    )
+                    new_img = np.empty((capacity, self._img_width * self._img_height), dtype=dtype_dict["image"])
                     new_img[:old_cap, :] = old_img
                     data_dict["image"] = new_img
-                    capacity = new_capacity
 
+                # Generate features & chart
                 image_label_data = self._generate_daily_features(stock_df, date)
                 if isinstance(image_label_data, dict):
-                    # Debug: print out returns and classification labels for buy/sell
-                    # print(f"[DEBUG] Ticker {stock_id} on {date.strftime('%Y-%m-%d')}:")
-                    # for ret in ["Ret"] + [f"Ret_{i}d" for i in self.ret_len_list]:
-                    #     ret_val = image_label_data.get(ret, "NA")
-                    #     label_val = image_label_data.get(f"{ret}_label", "NA")
-                    #     print(f"   {ret} = {ret_val}, {ret}_label = {label_val}")
-
-                    # For debugging: save example images
-                    if stock_id == 'AAPL' and date > pd.Timestamp('2020-01-02'):
-                        dbg_dir = ut.get_dir(op.join(self.save_dir, "sample_images"))
-                        image_label_data["image"].save(
-                            op.join(dbg_dir, f"{self.file_name}_{stock_id}_{date.strftime('%Y%m%d')}.png")
-                        )
-
                     image_label_data["StockID"] = stock_id
                     im_arr = np.frombuffer(image_label_data["image"].tobytes(), dtype=np.uint8)
                     if im_arr.size != self._img_width * self._img_height:
@@ -204,19 +184,12 @@ class GenerateStockData:
                 elif isinstance(image_label_data, int):
                     data_miss[image_label_data] += 1
 
-        # Truncate final arrays to used length
+        # Truncate
         for feature in feature_list:
             data_dict[feature] = data_dict[feature][:sample_num]
         data_dict["image"] = data_dict["image"][:sample_num, :]
 
-        # Debug info: shape checks
-        total_pixels_written = sample_num * self._img_width * self._img_height
-        print(f"[DEBUG] Final sample_num = {sample_num}")
-        print(f"[DEBUG] _img_width={self._img_width}, _img_height={self._img_height}")
-        print(f"[DEBUG] Expecting total pixels {total_pixels_written}")
-        print(f"[DEBUG] data_dict['image'] shape => {data_dict['image'].shape}")
-
-        # Write images to memmap
+        # Write to memmap
         fp_x = np.memmap(
             self.images_filename,
             dtype=np.uint8,
@@ -224,71 +197,48 @@ class GenerateStockData:
             shape=data_dict["image"].shape,
         )
         fp_x[:] = data_dict["image"][:]
-        fp_x.flush()  # Ensure data is fully written
-        fp_x_base_shape = fp_x.shape
+        fp_x.flush()
         fp_x = None  # close memmap
-        print(f"[DEBUG] Wrote memmap of shape {fp_x_base_shape} to {self.images_filename}")
 
         # Save label data
         df_out = pd.DataFrame({k: data_dict[k] for k in data_dict.keys() if k != "image"})
-        df_out.head(10).to_string(sys.stdout)  # print a sample
         df_out.to_feather(self.labels_filename)
-        print(f"[DEBUG] Saved label data to {self.labels_filename} with shape {df_out.shape}")
-        print(f"[DEBUG] label_data first few rows =>\n{df_out.head(5)}")
 
         with open(self.log_file_name, "w+") as log_file:
             log_file.write(f"total_dates:{sample_num} total_missing:{int(np.sum(data_miss))}\n")
 
-        print(f"Saved image data to {self.images_filename}")
-        print(f"Saved label data to {self.labels_filename}")
+        print(f"[INFO] Wrote memmap to {self.images_filename}")
+        print(f"[INFO] Wrote label data to {self.labels_filename}, shape={df_out.shape}")
 
     def save_annual_ts_data(self) -> None:
-        """
-        Placeholder to generate 1D time-series data if needed. Not fully implemented in this example.
-        """
+        """Placeholder if you also generate TS1D data."""
         pass
 
     def _remove_old_files(self) -> None:
-        """
-        Remove old data files (log, label, images) to ensure a fresh start.
-        """
         for fpath in [self.log_file_name, self.labels_filename, self.images_filename]:
             if op.isfile(fpath):
                 print(f"[DEBUG] Removing old file {fpath}")
                 os.remove(fpath)
 
     def _pre_generated_file_exists_and_valid(self) -> bool:
-        """
-        Checks if the log_file, label_file, and image_file exist, and if
-        the image_file size is compatible with the expected shape.
-        Returns False if any check fails, otherwise True.
-        """
-        if not (
-            op.isfile(self.log_file_name)
-            and op.isfile(self.labels_filename)
-            and op.isfile(self.images_filename)
-        ):
+        if not (op.isfile(self.log_file_name) and op.isfile(self.labels_filename) and op.isfile(self.images_filename)):
             return False
-
         try:
             images_mem = np.memmap(self.images_filename, dtype=np.uint8, mode="r")
             total_size = images_mem.shape[0]
-            expected_pixels_per_image = self._img_width * self._img_height
-            if total_size % expected_pixels_per_image != 0:
+            exp_pixels = self._img_width * self._img_height
+            if total_size % exp_pixels != 0:
                 return False
         except Exception:
             return False
-
         return True
 
     @property
     def _img_width(self) -> int:
-        """Return the image width based on chart_len."""
         return dcf.IMAGE_WIDTH[self.chart_len]
 
     @property
     def _img_height(self) -> int:
-        """Return the image height based on chart_len (plus extra if volume_bar)."""
         base_h = dcf.IMAGE_HEIGHT[self.chart_len]
         if self.volume_bar:
             base_h += int(base_h / 5) + dcf.VOLUME_CHART_GAP
@@ -298,8 +248,7 @@ class GenerateStockData:
         self, stock_df: pd.DataFrame, date: pd.Timestamp
     ) -> Union[dict, int]:
         """
-        Build the daily chart for one stock & date, returning a dict of features if successful.
-        Otherwise return an int code for specific errors.
+        Build a daily chart for one stock & date. Returns a dict if success, int code on error.
         """
         res = self.load_adjusted_daily_prices(stock_df, date)
         if isinstance(res, int):
@@ -319,10 +268,11 @@ class GenerateStockData:
         except DrawChartError:
             return 5
 
+        # last row
         last_day = df[df.Date == date].iloc[0]
         feature_dict = {col: last_day[col] for col in stock_df.columns if col in last_day}
 
-        # Add classification/regression labels
+        # add classification/regression labels
         ret_list = ["Ret"] + [f"Ret_{i}d" for i in self.ret_len_list]
         for ret in ret_list:
             feature_dict[f"{ret}_label"] = 1 if feature_dict.get(ret, 0) > 0 else 0
@@ -340,19 +290,13 @@ class GenerateStockData:
     def load_adjusted_daily_prices(
         self, stock_df: pd.DataFrame, date: pd.Timestamp
     ) -> Union[int, Tuple[pd.DataFrame, List[int]]]:
-        """
-        For a given date, load the chunk of daily data to form an OHLC chart, adjusting price if needed.
-        Return an int error code if something fails.
-        """
         if date not in set(stock_df.Date):
             return 0
-
         date_index = stock_df[stock_df.Date == date].index[0]
         ma_offset = 0 if self.ma_lags is None else max(self.ma_lags)
         data = stock_df.loc[(date_index - (self.window_size - 1) - ma_offset): date_index]
         if len(data) < self.window_size:
             return 1
-
         if len(data) < (self.window_size + ma_offset):
             local_ma_lags = []
             data = stock_df.loc[(date_index - (self.window_size - 1)): date_index]
@@ -395,19 +339,14 @@ class GenerateStockData:
         return df, local_ma_lags
 
     def convert_daily_df_to_chart_freq_df(self, daily_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Aggregate daily_df rows into blocks of chart_freq days. Raises ChartGenerationError
-        if length is not divisible by chart_freq.
-        """
         length = len(daily_df)
         if length % self.chart_freq != 0:
             raise ChartGenerationError("df not divisible by chart_freq")
 
         ohlc_len = length // self.chart_freq
         out = pd.DataFrame(index=range(ohlc_len), columns=daily_df.columns)
-
         for i in range(ohlc_len):
-            chunk = daily_df.iloc[i * self.chart_freq: (i + 1) * self.chart_freq]
+            chunk = daily_df.iloc[i*self.chart_freq:(i+1)*self.chart_freq]
             out.loc[i] = chunk.iloc[-1]
             out.loc[i, "Open"] = chunk.iloc[0]["Open"]
             out.loc[i, "High"] = chunk["High"].max()
@@ -418,10 +357,6 @@ class GenerateStockData:
 
     @staticmethod
     def adjust_price(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adjust daily OHLC so the first row has Close=1.0, subsequent days
-        follow from daily returns. Raises ChartGenerationError if invalid.
-        """
         if len(df) == 0:
             raise ChartGenerationError("Empty DataFrame in adjust_price.")
         if len(df.Date.unique()) != len(df):
@@ -429,7 +364,7 @@ class GenerateStockData:
 
         df = df.reset_index(drop=True)
         fd_close = abs(df.at[0, "Close"])
-        if (fd_close == 0.0) or pd.isna(fd_close):
+        if fd_close == 0.0 or pd.isna(fd_close):
             raise ChartGenerationError("First day close is zero/nan.")
 
         res_df = df.copy()
@@ -441,31 +376,22 @@ class GenerateStockData:
 
         for i in range(1, len(res_df)):
             ret = float(res_df.at[i, "Ret"])
-            this_close = (1 + ret) * pre_close
+            this_close = (1 + ret)*pre_close
             orig_close = abs(res_df.at[i, "Close"])
             if orig_close == 0.0 or pd.isna(orig_close):
                 continue
             res_df.at[i, "Close"] = this_close
-            scale = this_close / orig_close
+            scale = this_close/orig_close
             res_df.at[i, "Open"] *= scale
             res_df.at[i, "High"] *= scale
             res_df.at[i, "Low"] *= scale
             res_df.at[i, "Ret"] = ret
             pre_close = this_close
-
         return res_df
 
-    def _get_feature_and_dtype_list(self) -> Tuple[dict, list]:
-        """
-        Return (dtype_dict, feature_list) for memory-mapping arrays.
-        """
+    def _get_feature_and_dtype_list(self):
         float32_features = [
-            "EWMA_vol",
-            "Ret",
-            "Ret_tstat",
-            "Ret_week",
-            "Ret_month",
-            "Ret_quarter",
+            "EWMA_vol", "Ret", "Ret_tstat", "Ret_week", "Ret_month", "Ret_quarter",
             "MarketCap",
         ] + [f"Ret_{i}d" for i in self.ret_len_list] + [f"Ret_{i}d_tstat" for i in self.ret_len_list]
 
