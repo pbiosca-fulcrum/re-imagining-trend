@@ -6,9 +6,13 @@ generate_chart.py
 Generates chart images (OHLC) from daily data for each stock, saving them
 in a memory-mapped file. These images can then feed into CNN training.
 
-Key modifications to speed up:
-  1) We add a flag 'verbose_missing_date' to disable spamming logs for each missing date.
-  2) (Optionally) we show an example of parallel processing with joblib.
+Key changes:
+  1) A new `save_annual_data_parallel(n_jobs=4)` method, which parallelizes the
+     stock loop via joblib.
+  2) A helper `_process_one_stock` that returns partial results for that stock.
+  3) We gather those results, then do the final memmap writing once.
+  4) We also honor `verbose_missing_date` to avoid printing for each missing date
+     unless you specifically enable it.
 """
 
 from typing import Optional, List, Tuple, Union
@@ -21,6 +25,8 @@ import pandas as pd
 from tqdm import tqdm
 from PIL import Image
 
+from joblib import Parallel, delayed  # <-- for parallelization
+
 from src.data import dgp_config as dcf
 from src.data import equity_data as eqd
 from src.data.chart_library import DrawOHLC, DrawChartError
@@ -28,7 +34,6 @@ from src.utils import utilities as ut
 
 class ChartGenerationError(Exception):
     """Custom exception for chart generation."""
-    pass
 
 class GenerateStockData:
     """
@@ -63,7 +68,7 @@ class GenerateStockData:
         allow_tqdm: bool = True,
         chart_type: str = "bar",
         step_size: Optional[int] = 1,
-        verbose_missing_date: bool = True
+        verbose_missing_date: bool = False
     ) -> None:
         self.country = country
         self.year = year
@@ -79,7 +84,7 @@ class GenerateStockData:
         self.step_size = step_size if step_size else 1
         self.verbose_missing_date = verbose_missing_date
 
-        # For storing label columns:
+        # The return horizons for classification/regression labels
         self.ret_len_list = [5, 20, 60, 65, 180, 250, 260]
 
         # Directory structure
@@ -97,51 +102,48 @@ class GenerateStockData:
 
         self.df: Union[pd.DataFrame, None] = None
         self.stock_id_list: Union[np.ndarray, None] = None
+        
+    def save_annual_ts_data(self) -> None:
+        """
+        Placeholder to generate 1D time-series data if needed. Not fully implemented in this example.
+        """
+        pass
 
     def save_annual_data(self) -> None:
         """
         Create chart images for the specified year, memory-map them, and store label data
-        in a Feather file. If existing pre-generated files appear valid, skip regeneration.
+        in a Feather file. Single-threaded version.
         """
         if self._pre_generated_file_exists_and_valid():
             print(f"Found valid pre-generated file {self.file_name}, skipping.")
             return
 
-        # Remove old partial files
         self._remove_old_files()
 
-        print(f"Generating {self.file_name}")
-        # load the raw processed data for (year-2..year)
+        print(f"Generating {self.file_name} [single-thread]")
         self.df = eqd.get_processed_us_data_by_year(self.year)
-
         self.stock_id_list = np.unique(self.df.index.get_level_values("StockID"))
 
-        # Provisional capacity ~60 samples per stock
+        # We'll just loop normally. If you want parallel, call save_annual_data_parallel(n_jobs=4).
         capacity = len(self.stock_id_list) * 60
-
-        # Prepare arrays
         dtype_dict, feature_list = self._get_feature_and_dtype_list()
         data_dict = {feature: np.empty(capacity, dtype=dtype_dict[feature]) for feature in feature_list}
         data_dict["image"] = np.empty((capacity, self._img_width * self._img_height), dtype=dtype_dict["image"])
         data_dict["image"].fill(0)
 
         sample_num = 0
-        data_miss = np.zeros(6)  # track error codes
+        data_miss = np.zeros(6, dtype=int)
 
-        # We'll build an iterator for stock IDs
         iterator = self.stock_id_list
         if self.allow_tqdm and ("tqdm" in sys.modules):
             iterator = tqdm(iterator, desc="GenerateChart", unit="stock")
 
         for stock_id in iterator:
             stock_df = self.df.xs(stock_id, level=1).copy().reset_index()
-            # Keep only the target year’s valid daily rows
             valid_dates = stock_df[~pd.isna(stock_df["Ret"])].Date
             valid_dates = valid_dates[valid_dates.dt.year == self.year].sort_values()
 
-            # We sample every self.step_size days (default 1 => daily).
-            # But here we override with eqd.get_period_end_dates(self.freq) => weekly/monthly last day:
-            # If you truly want daily, comment out the 2 lines below, and use range(0,len(valid_dates),self.step_size)
+            # For weekly/monthly sampling:
             date_candidates = eqd.get_period_end_dates(self.freq)
             date_candidates = date_candidates[date_candidates.year == self.year]
             # If you want daily:
@@ -149,17 +151,15 @@ class GenerateStockData:
 
             for dt in date_candidates:
                 if dt not in valid_dates.values:
-                    # Silently skip if not found, unless verbose_missing_date is True
                     if self.verbose_missing_date:
                         print(f"[DEBUG] Missing date {dt} for {stock_id}")
                     continue
 
-                date = dt
-                # Check capacity
                 if sample_num >= capacity:
+                    # expand arrays
                     old_cap = capacity
                     capacity += 100
-                    print(f"[DEBUG] Expanding arrays from {old_cap} to {capacity} for {stock_id} {date}")
+                    print(f"[DEBUG] Expanding arrays from {old_cap} to {capacity} for {stock_id} {dt}")
                     for feature in feature_list:
                         old_arr = data_dict[feature]
                         new_arr = np.empty(capacity, dtype=dtype_dict[feature])
@@ -170,14 +170,11 @@ class GenerateStockData:
                     new_img[:old_cap, :] = old_img
                     data_dict["image"] = new_img
 
-                # Generate features & chart
-                image_label_data = self._generate_daily_features(stock_df, date)
+                image_label_data = self._generate_daily_features(stock_df, dt)
                 if isinstance(image_label_data, dict):
                     image_label_data["StockID"] = stock_id
                     im_arr = np.frombuffer(image_label_data["image"].tobytes(), dtype=np.uint8)
-                    if im_arr.size != self._img_width * self._img_height:
-                        print(f"[DEBUG] Mismatch in image size for {stock_id} {date}, got {im_arr.size}.")
-                    data_dict["image"][sample_num, :] = im_arr[:]
+                    data_dict["image"][sample_num, :] = im_arr
                     for feature in [f for f in feature_list if f != "image"]:
                         data_dict[feature][sample_num] = image_label_data[feature]
                     sample_num += 1
@@ -190,29 +187,119 @@ class GenerateStockData:
         data_dict["image"] = data_dict["image"][:sample_num, :]
 
         # Write to memmap
-        fp_x = np.memmap(
-            self.images_filename,
-            dtype=np.uint8,
-            mode="w+",
-            shape=data_dict["image"].shape,
-        )
+        fp_x = np.memmap(self.images_filename, dtype=np.uint8, mode="w+", shape=data_dict["image"].shape)
         fp_x[:] = data_dict["image"][:]
         fp_x.flush()
-        fp_x = None  # close memmap
+        fp_x = None
 
-        # Save label data
         df_out = pd.DataFrame({k: data_dict[k] for k in data_dict.keys() if k != "image"})
         df_out.to_feather(self.labels_filename)
 
         with open(self.log_file_name, "w+") as log_file:
             log_file.write(f"total_dates:{sample_num} total_missing:{int(np.sum(data_miss))}\n")
 
-        print(f"[INFO] Wrote memmap to {self.images_filename}")
-        print(f"[INFO] Wrote label data to {self.labels_filename}, shape={df_out.shape}")
+        print(f"[INFO] Single-thread done -> wrote memmap to {self.images_filename}, label data to {self.labels_filename}")
 
-    def save_annual_ts_data(self) -> None:
-        """Placeholder if you also generate TS1D data."""
-        pass
+    def save_annual_data_parallel(self, n_jobs=6) -> None:
+        """
+        Same as save_annual_data(), but parallel over stocks using joblib. Each worker
+        processes one stock, returning partial results (images + label rows).
+        Then we gather and write one big memmap + one Feather at the end.
+
+        n_jobs: how many CPU cores to use in parallel
+        """
+        if self._pre_generated_file_exists_and_valid():
+            print(f"Found valid pre-generated file {self.file_name}, skipping.")
+            return
+
+        self._remove_old_files()
+
+        print(f"Generating {self.file_name} [parallel, n_jobs={n_jobs}]")
+        self.df = eqd.get_processed_us_data_by_year(self.year)
+        self.stock_id_list = np.unique(self.df.index.get_level_values("StockID"))
+
+        # 1) Parallel call: each stock => partial list of dicts
+        if self.allow_tqdm and ("tqdm" in sys.modules):
+            # We'll use tqdm manually around the Parallel to see progress
+            # joblib >= 1.0 has 'prefer="processes"' if you want
+            # The "parallel_backend" can be used, or we do it like this:
+            stock_ids_iter = tqdm(self.stock_id_list, desc=f"Parallel {self.year}", unit="stock")
+        else:
+            stock_ids_iter = self.stock_id_list
+
+        results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+            delayed(self._process_one_stock)(stock_id) for stock_id in stock_ids_iter
+        )
+
+        # 2) Flatten the results from all stocks
+        # results is a list of partial_records (each partial_records is a list of dicts)
+        all_records = []
+        for partial in results:
+            all_records.extend(partial)
+
+        # 3) Convert these all_records into final arrays
+        sample_num = len(all_records)
+        if sample_num == 0:
+            print("[WARN] No valid charts produced. Exiting.")
+            return
+
+        dtype_dict, feature_list = self._get_feature_and_dtype_list()
+        capacity = sample_num  # exactly
+        data_dict = {feature: np.empty(capacity, dtype=dtype_dict[feature]) for feature in feature_list}
+        data_dict["image"] = np.empty((capacity, self._img_width * self._img_height), dtype=dtype_dict["image"])
+        data_dict["image"].fill(0)
+
+        # 4) Fill final arrays
+        for i, row_dict in enumerate(all_records):
+            im_arr = np.frombuffer(row_dict["image"].tobytes(), dtype=np.uint8)
+            data_dict["image"][i, :] = im_arr
+            for feature in [f for f in feature_list if f != "image"]:
+                data_dict[feature][i] = row_dict[feature]
+
+        # 5) Write memmap
+        fp_x = np.memmap(self.images_filename, dtype=np.uint8, mode="w+", shape=data_dict["image"].shape)
+        fp_x[:] = data_dict["image"][:]
+        fp_x.flush()
+        fp_x = None  # close memmap
+
+        # 6) Save label data
+        df_out = pd.DataFrame({k: data_dict[k] for k in data_dict.keys() if k != "image"})
+        df_out.to_feather(self.labels_filename)
+
+        with open(self.log_file_name, "w+") as log_file:
+            log_file.write(f"total_dates:{sample_num}\n")
+        print(f"[INFO] Parallel done -> wrote memmap to {self.images_filename}, label data to {self.labels_filename}")
+
+    def _process_one_stock(self, stock_id: str) -> List[dict]:
+        """
+        Helper function run by each joblib worker.
+        We gather partial results (each row is a dict with 'image' plus label fields).
+        Returns a list of dicts. 
+        """
+        partial_records = []
+        # Slice out this stock
+        stock_df = self.df.xs(stock_id, level=1).copy().reset_index()
+        valid_dates = stock_df[~pd.isna(stock_df["Ret"])].Date
+        valid_dates = valid_dates[valid_dates.dt.year == self.year].sort_values()
+
+        # For weekly/monthly sampling:
+        date_candidates = eqd.get_period_end_dates(self.freq)
+        date_candidates = date_candidates[date_candidates.year == self.year]
+        # If daily:
+        # date_candidates = valid_dates[::self.step_size]
+
+        for dt in date_candidates:
+            if dt not in valid_dates.values:
+                if self.verbose_missing_date:
+                    print(f"[DEBUG] Missing date {dt} for {stock_id}")
+                continue
+
+            image_label_data = self._generate_daily_features(stock_df, dt)
+            if isinstance(image_label_data, dict):
+                image_label_data["StockID"] = stock_id
+                partial_records.append(image_label_data)
+            # If it's an int error code, we skip
+        return partial_records
 
     def _remove_old_files(self) -> None:
         for fpath in [self.log_file_name, self.labels_filename, self.images_filename]:
@@ -268,11 +355,10 @@ class GenerateStockData:
         except DrawChartError:
             return 5
 
-        # last row
+        # Build label columns from final row
         last_day = df[df.Date == date].iloc[0]
         feature_dict = {col: last_day[col] for col in stock_df.columns if col in last_day}
 
-        # add classification/regression labels
         ret_list = ["Ret"] + [f"Ret_{i}d" for i in self.ret_len_list]
         for ret in ret_list:
             feature_dict[f"{ret}_label"] = 1 if feature_dict.get(ret, 0) > 0 else 0
@@ -294,9 +380,11 @@ class GenerateStockData:
             return 0
         date_index = stock_df[stock_df.Date == date].index[0]
         ma_offset = 0 if self.ma_lags is None else max(self.ma_lags)
+
         data = stock_df.loc[(date_index - (self.window_size - 1) - ma_offset): date_index]
         if len(data) < self.window_size:
             return 1
+
         if len(data) < (self.window_size + ma_offset):
             local_ma_lags = []
             data = stock_df.loc[(date_index - (self.window_size - 1)): date_index]
@@ -415,3 +503,27 @@ class GenerateStockData:
         }
         dtype_dict["image"] = np.uint8
         return dtype_dict, feature_list
+
+
+if __name__ == "__main__":
+    """
+    Example usage:
+    """
+    # Suppose you want to generate for a single year, but parallel.
+    obj = GenerateStockData(
+        country="USA",
+        year=1993,
+        window_size=5,
+        freq="week",
+        chart_freq=1,
+        ma_lags=[5],
+        volume_bar=True,
+        need_adjust_price=True,
+        allow_tqdm=True,
+        chart_type="bar",
+        step_size=1,
+        verbose_missing_date=False
+    )
+
+    # Call the parallel version (n_jobs=4) ...
+    obj.save_annual_data_parallel(n_jobs=4)

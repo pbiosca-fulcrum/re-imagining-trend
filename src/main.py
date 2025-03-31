@@ -55,7 +55,8 @@ def main() -> None:
             chart_type=chart_type,
         )
         # Generate CNN2D Data
-        dgp_obj.save_annual_data()
+        # dgp_obj.save_annual_data()
+        dgp_obj.save_annual_data_parallel()
         # Generate CNN1D Data
         dgp_obj.save_annual_ts_data()
 
