@@ -1,101 +1,137 @@
 # src/data/equity_data.py
+
 """
 equity_data.py
 
-Handles reading and processing of raw US stock data.
-Synthetic data generation has been disabled.
-If the raw file is not found, the code raises FileNotFoundError.
+Handles reading and processing of raw US stock data in chunks, converting columns
+to float32, optionally storing a backup in Parquet, and returning the full DataFrame.
 
-Optimizations:
-  - Only the necessary columns are read from the CSV.
-  - The EXCHCD column (and any other unused ones) is dropped.
-  - Date parsing and conversion of RET values are done early to minimize memory overhead.
-  - Vectorized operations are used where possible.
+If even this approach crashes on a ~63-million-row dataset, consider:
+  - Setting SAVE_BACKUP = False (skip the final Parquet write).
+  - Further splitting into multiple year-partitioned Parquet files (requires more advanced logic).
+  - Using a distributed solution like Dask or Polars for truly massive datasets.
 """
 
 import os
 import os.path as op
+import gc
 import numpy as np
 import pandas as pd
 import time
+
 from src.data import dgp_config as dcf
+
+# Toggle whether to store a final backup. If you're running out of memory,
+# set this to False to skip writing the massive DataFrame entirely.
+SAVE_BACKUP = True
 
 def get_processed_us_data_by_year(year: int) -> pd.DataFrame:
     """
     Retrieve processed U.S. data for a given year plus the two prior years.
     The returned DataFrame includes rows from (year-2) to year.
     """
-    df = processed_us_data()
+    df = processed_us_data()  # This loads (and possibly writes) the entire dataset
     keep_years = [year, year - 1, year - 2]
     idx_year = df.index.get_level_values("Date").year.isin(keep_years)
     return df[idx_year].copy()
 
 def processed_us_data() -> pd.DataFrame:
     """
-    Loads the processed U.S. stock dataset.
-    If a Feather file exists, it is loaded.
-    Otherwise, a compressed CSV file ('crsp_a_stock.csv.gz') is read using only the needed columns.
-    The following columns are used:
-      - date, PERMNO, BIDLO, ASKHI, PRC, VOL, SHROUT, OPENPRC, RET
-    These are then renamed to:
-      - Date, StockID, Low, High, Close, Vol, Shares, Open, Ret
-    Additional columns are computed:
-      - MarketCap, log_ret, cum_log_ret, EWMA_vol, and multi-day returns.
+    Loads the processed U.S. stock dataset in a memory-efficient manner.
+    If a Parquet file already exists, load from that.
+    Otherwise:
+      1) Read the large CSV in chunks (reducing memory usage).
+      2) Convert columns, rename, drop missing 'RET', etc.
+      3) Concatenate all chunks, set multi-index, compute extra columns (log_ret, EWMA, multi-day returns).
+      4) Convert numeric columns to float32.
+      5) If SAVE_BACKUP is True, save the final DataFrame to Parquet.
+      6) Return the final DataFrame.
+
+    If memory usage is still too high, consider:
+      - Setting SAVE_BACKUP=False to skip big disk writes.
+      - Partitioning by year or by StockID in separate files.
+      - Using a distributed framework like Dask/Polars.
     """
-    processed_us_data_path = op.join(dcf.PROCESSED_DATA_DIR, "us_ret.feather")
+
+    # Updated to store Parquet (rather than Feather) for huge DataFrames
+    processed_us_data_path = op.join(dcf.PROCESSED_DATA_DIR, "us_ret.parquet")
+
+    # If the Parquet file exists, just load it
     if op.exists(processed_us_data_path):
         print(f"Loading processed data from {processed_us_data_path}")
         since = time.time()
-        df = pd.read_feather(processed_us_data_path)
+        # Use pyarrow engine by default
+        df = pd.read_parquet(processed_us_data_path, engine="pyarrow")
+        # Rebuild multi-index
+        df["Date"] = pd.to_datetime(df["Date"])
         df.set_index(["Date", "StockID"], inplace=True)
         df.sort_index(inplace=True)
         print(f"Done loading in {(time.time() - since):.2f} sec")
-        print(f"Data columns: {df.columns.tolist()}")
-        return df.copy()
+        print(f"Data columns: {df.columns.tolist()}  shape={df.shape}")
+        return df
 
-    # Use only the necessary columns from the raw file.
+    # Otherwise, read raw CSV in chunks
     raw_us_data_path = op.join(dcf.RAW_DATA_DIR, "crsp_a_stock.csv.gz")
     if not op.exists(raw_us_data_path):
         raise FileNotFoundError(
             f"Raw data file not found at '{raw_us_data_path}'. "
-            "Synthetic data generation has been disabled. Please provide real data."
+            "Please provide real data."
         )
 
-    print(f"Reading raw data from {raw_us_data_path}")
+    print(f"Reading raw data in chunks from {raw_us_data_path}")
     since = time.time()
+
+    # We only load the columns we actually need
     usecols = ["date", "PERMNO", "BIDLO", "ASKHI", "PRC", "VOL", "SHROUT", "OPENPRC", "RET"]
     dtypes = {
-        "date": str,         # will be parsed later
-        "PERMNO": str,
+        "date": str,         # parse later
+        "PERMNO": str,       # parse or convert to category eventually
         "BIDLO": np.float64,
         "ASKHI": np.float64,
         "PRC": np.float64,
         "VOL": np.float64,
         "SHROUT": np.float64,
         "OPENPRC": np.float64,
-        "RET": str,          # read as string to catch placeholders
+        "RET": str,          # treat as string first to catch placeholders
     }
-    df = pd.read_csv(raw_us_data_path, usecols=usecols, dtype=dtypes, compression='infer')
-    # Parse date column
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
 
-    # Convert RET values with a converter function; non-numeric placeholders become NaN.
+    chunksize = 500_000
+    all_chunks = []
+
     def convert_ret(x):
         try:
             return float(x)
-        except Exception:
+        except:
             return np.nan
-    df["RET"] = df["RET"].apply(convert_ret)
-    df = df.dropna(subset=["RET"])
 
-    # Ensure numeric columns are positive (we take absolute values)
-    numeric_cols = ["BIDLO", "ASKHI", "PRC", "VOL", "SHROUT", "OPENPRC"]
-    for col in numeric_cols:
-        df[col] = df[col].abs()
+    # Read in loop
+    chunk_idx = 0
+    for chunk in pd.read_csv(raw_us_data_path, usecols=usecols, dtype=dtypes,
+                             compression='infer', chunksize=chunksize):
+        chunk["date"] = pd.to_datetime(chunk["date"], errors="coerce")
+        chunk.dropna(subset=["date"], inplace=True)
 
-    # Rename columns to the standard names.
-    df = df.rename(columns={
+        # Convert RET from string to float, dropping placeholder entries
+        chunk["RET"] = chunk["RET"].apply(convert_ret)
+        chunk.dropna(subset=["RET"], inplace=True)
+
+        numeric_cols = ["BIDLO", "ASKHI", "PRC", "VOL", "SHROUT", "OPENPRC"]
+        for col in numeric_cols:
+            chunk[col] = chunk[col].abs()
+
+        all_chunks.append(chunk)
+        chunk_idx += 1
+        print(f"  Processed chunk {chunk_idx}, shape={chunk.shape}")
+
+    if not all_chunks:
+        raise ValueError("No valid data found in the raw CSV after chunk processing.")
+
+    df = pd.concat(all_chunks, ignore_index=True)
+    del all_chunks  # free memory
+    print(f"Concatenated all chunks: final shape {df.shape}")
+
+    # Rename columns
+    df.rename(columns={
         "date": "Date",
         "PERMNO": "StockID",
         "BIDLO": "Low",
@@ -105,21 +141,24 @@ def processed_us_data() -> pd.DataFrame:
         "SHROUT": "Shares",
         "OPENPRC": "Open",
         "RET": "Ret"
-    })
+    }, inplace=True)
 
-    # Compute market capitalization.
+    # Compute MarketCap
     df["MarketCap"] = df["Close"] * df["Shares"]
 
-    # Set a multi-index and sort.
+    # Convert to category (reduces memory if many repeated IDs)
+    df["StockID"] = df["StockID"].astype("category")
+
+    # Create multi-index
     df.set_index(["Date", "StockID"], inplace=True)
     df.sort_index(inplace=True)
 
-    # Compute log returns, cumulative log returns, and EWMA volatility.
-    df["log_ret"] = np.log(1 + df["Ret"])
+    # log returns, cumulative log returns, and EWMA
+    df["log_ret"] = np.log(1.0 + df["Ret"])
     df["cum_log_ret"] = df.groupby("StockID")["log_ret"].cumsum()
     df["EWMA_vol"] = df.groupby("StockID")["Ret"].transform(lambda x: (x**2).ewm(alpha=0.05).mean().shift(1))
 
-    # Compute multi-day returns for various frequencies.
+    from .equity_data import get_period_end_dates
     for freq in ["week", "month", "quarter", "year"]:
         period_end_dates = get_period_end_dates(freq)
         mask = df.index.get_level_values("Date").isin(period_end_dates)
@@ -128,35 +167,47 @@ def processed_us_data() -> pd.DataFrame:
         )
         df.loc[mask, f"Ret_{freq}"] = freq_ret.loc[mask]
 
-    # Compute returns for specific day lags.
     for i in [5, 20, 60, 65, 180, 250, 260]:
         df[f"Ret_{i}d"] = df.groupby("StockID")["cum_log_ret"].transform(
             lambda x: np.exp(x.shift(-i) - x) - 1
         )
 
     print(f"Finished processing raw data in {(time.time() - since):.2f} sec")
-    return df.copy()
+    # Convert numeric columns to float32 to reduce memory usage ~ by half
+    float_cols = [
+        "Low", "High", "Close", "Vol", "Shares", "Open", "Ret",
+        "MarketCap", "log_ret", "cum_log_ret", "EWMA_vol",
+        "Ret_week", "Ret_month", "Ret_quarter", "Ret_year",
+        "Ret_5d", "Ret_20d", "Ret_60d", "Ret_65d", "Ret_180d", "Ret_250d", "Ret_260d"
+    ]
+    for c in float_cols:
+        if c in df.columns:
+            df[c] = df[c].astype(np.float32, errors="ignore")
 
-def process_raw_data_helper(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    A minimal helper to perform any additional replacements.
-    Here we use it to drop known placeholders.
-    """
-    replacements = {
-        "Close": {0: np.nan},
-        "Open": {0: np.nan},
-        "High": {0: np.nan},
-        "Low": {0: np.nan},
-        "Ret": {"C": np.nan, "B": np.nan, "A": np.nan, ".": np.nan,
-                -66.0: np.nan, -77.0: np.nan, -88.0: np.nan, -99.0: np.nan},
-        "Vol": {0: np.nan, -99: np.nan},
-    }
-    df = df.replace(replacements)
-    df = df.dropna(subset=["Ret"])
-    if not isinstance(df.index, pd.MultiIndex):
+    if SAVE_BACKUP:
+        # Because writing a massive DataFrame can spike memory usage, we do it carefully
+        print("Converting index back to columns for Parquet ...")
+        df_out = df.reset_index()
+        # Release memory for df if needed
+        df = None
+        gc.collect()
+
+        # Write Parquet using PyArrow engine (snappy or gzip compression):
+        print("Storing a backup to Parquet for future fast access...")
+        start_write = time.time()
+        df_out.to_parquet(processed_us_data_path, index=False, engine="pyarrow", compression="snappy")
+        print(f"Done writing Parquet in {(time.time() - start_write):.2f} sec. Path={processed_us_data_path}")
+
+        # Rebuild the final df in memory if we want to return it
+        # (We'll read from Parquet to ensure identical data & not blow memory.)
+        df = pd.read_parquet(processed_us_data_path, engine="pyarrow")
+        df["Date"] = pd.to_datetime(df["Date"])
         df.set_index(["Date", "StockID"], inplace=True)
-    df.sort_index(inplace=True)
-    return df
+        df.sort_index(inplace=True)
+        df_out = None
+        gc.collect()
+
+    return df.copy()
 
 def get_spy_freq_rets(freq: str) -> pd.DataFrame:
     """
