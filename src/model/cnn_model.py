@@ -324,23 +324,18 @@ class CNNModel(nn.Module):
 
 class CNN1DModel(nn.Module):
     """
-    1D CNN Implementation for time-series usage (O/H/L/C/Vol lines).
-    Typically, shape is (batch, 6, window_size).
+    1D CNN Implementation for time-series data.
+    
+    Input:
+      - A tensor of shape (batch_size, 6, ws) where the 6 channels correspond to:
+          0: Open, 1: High, 2: Low, 3: Close, 4: Moving Average, 5: Volume.
+    Architecture:
+      - A series of 1D convolutional blocks (Conv1d → BatchNorm1d → LeakyReLU → MaxPool1d)
+      - Flatten, dropout, then a fully connected layer.
     """
-
-    def __init__(
-        self,
-        layer_number: int,
-        ws: int,
-        inplanes: int,
-        drop_prob: float,
-        filter_size_list,
-        stride_list,
-        padding_list,
-        dilation_list,
-        max_pooling_list,
-        regression_label=None,
-    ):
+    def __init__(self, layer_number, ws, inplanes, drop_prob,
+                 filter_size_list, stride_list, padding_list,
+                 dilation_list, max_pooling_list, regression_label=None):
         super().__init__()
         self.layer_number = layer_number
         self.ws = ws
@@ -348,25 +343,20 @@ class CNN1DModel(nn.Module):
         self.drop_prob = drop_prob
         self.filter_size_list = filter_size_list
         self.stride_list = stride_list
-        self.padding_list = padding_list
+        self.padding_list = padding_list  # should be integer padding per layer
         self.dilation_list = dilation_list
-        self.max_pooling_list = max_pooling_list
+        self.max_pooling_list = max_pooling_list  # each is an integer for 1D pooling
         self.regression_label = regression_label
 
         self.conv_layers = self._init_ts1d_conv_layers()
         fc_size = self._get_ts1d_conv_layers_flatten_size()
-
-        if regression_label:
-            self.fc = nn.Linear(fc_size, 1)
-        else:
-            self.fc = nn.Linear(fc_size, 2)
-
+        self.fc = nn.Linear(fc_size, 1 if regression_label else 2)
         self.apply(init_weights)
 
-    def _init_ts1d_conv_layers(self) -> nn.Sequential:
+    def _init_ts1d_conv_layers(self):
         conv_layer_chanls = [self.inplanes * (2 ** i) for i in range(self.layer_number)]
         layers = []
-        prev_chanl = 6  # open/high/low/close/ma/vol
+        prev_chanl = 6  # because our TS1D input has 6 channels
         for i, out_ch in enumerate(conv_layer_chanls):
             layers.append(
                 nn.Sequential(
@@ -384,7 +374,6 @@ class CNN1DModel(nn.Module):
                 )
             )
             prev_chanl = out_ch
-
         layers.append(Flatten())
         layers.append(nn.Dropout(p=self.drop_prob))
         return nn.Sequential(*layers)

@@ -9,7 +9,7 @@ Defines Torch Dataset classes for handling 2D CNN images (OHLC charts) or 1D CNN
 - Added docstrings and small formatting improvements for clarity.
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import os.path as op
 import numpy as np
 import pandas as pd
@@ -328,58 +328,53 @@ class EquityDataset(Dataset):
 
 class TS1DDataset(Dataset):
     """
-    Torch Dataset for 1D CNN usage: loads pre-saved time-series data (open/high/low/close/ma/vol).
+    Torch Dataset for 1D CNN usage: loads pre-saved time‐series data.
+    
+    Each sample is a (6, window_size) array where the channels correspond to:
+      0: Open price
+      1: High price
+      2: Low price
+      3: Close price
+      4: Moving Average (over the window)
+      5: Volume
+      
+    The dataset applies scaling (min–max or volatility scaling) and then normalizes
+    each channel with per-channel mean and std (computed over a subset).
     """
-
-    def __init__(
-        self,
-        window_size: int,
-        predict_window: int,
-        freq: str,
-        year: int,
-        country: str = "USA",
-        remove_tail: bool = False,
-        ohlc_len: Optional[int] = None,
-        ts_scale: str = "image_scale",
-        regression_label: Optional[str] = None
-    ) -> None:
+    def __init__(self, window_size, predict_window, freq, year, country="USA",
+                 remove_tail=False, ohlc_len=None, ts_scale="image_scale",
+                 regression_label=None):
         self.ws = window_size
         self.pw = predict_window
         self.freq = freq
         self.year = year
-        self.ohlc_len = ohlc_len if ohlc_len else window_size
+        self.ohlc_len = ohlc_len if ohlc_len is not None else window_size
         self.country = country
         self.remove_tail = remove_tail
         self.ts_scale = ts_scale
-        self.regression_label = regression_label
-
         assert self.ts_scale in ["image_scale", "ret_scale", "vol_scale"]
+        self.regression_label = regression_label
+        assert self.regression_label in [None, "raw_ret", "vol_adjust_ret"]
 
+        # Load the pre-saved 1D time-series data
         self.images, self.label_dict = self.load_ts1d_data()
-
-        # Decide on label name
+        # Define label column name for 1D model (e.g., "Retx_month" if pw=20)
         self.ret_val_name = f"Retx_{dcf.FREQ_DICT[self.pw]}"
         self.label = self.get_label_value()
-
-        # filter
         self.filter_data(self.remove_tail)
-
-        # finalize normalization
         self.demean = self._get_1d_mean_std()
 
-    def load_ts1d_data(self) -> tuple:
+    def load_ts1d_data(self) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Load 1D time-series data for a given year/country from .npz files.
+        Load 1D time-series data from a pre-generated .npz file.
+        Assumes the .npz file contains a dictionary 'data_dict' with key 'predictor'
+        holding the predictor data (shape: [num_samples, 6, window_size]) and other label info.
         """
         dataset_name = self.__get_stock_dataset_name()
-        filename = op.join(
-            dcf.STOCKS_SAVEPATH,
-            "stocks_USA_ts/dataset_all/",
-            f"{dataset_name}_data_new.npz"
-        )
+        filename = op.join(dcf.STOCKS_SAVEPATH, "stocks_USA_ts", "dataset_all", f"{dataset_name}_data_new.npz")
         data = np.load(filename, mmap_mode="r", encoding="latin1", allow_pickle=True)
         label_dict = data["data_dict"].item()
-        images = label_dict["predictor"].copy()
+        images = label_dict["predictor"].copy()  # shape should be (num_samples, 6, window_size)
         del label_dict["predictor"]
         label_dict["StockID"] = label_dict["StockID"].astype(str)
         return images, label_dict
@@ -388,32 +383,24 @@ class TS1DDataset(Dataset):
         base = f"{self.ws}d"
         data_freq = self.freq if self.ohlc_len == self.ws else "month"
         suffix = "ts"
-        str_list = [base, data_freq, "has_vb", f"[{self.ws}]_ma", str(self.year)]
+        parts = [base, data_freq, "has_vb", f"[{self.ws}]_ma", str(self.year)]
         if self.ohlc_len != self.ws:
-            str_list.append(f"{self.ohlc_len}ohlc")
-        str_list.append(suffix)
-        return "_".join(str_list)
+            parts.append(f"{self.ohlc_len}ohlc")
+        parts.append(suffix)
+        return "_".join(parts)
 
     def get_label_value(self) -> np.ndarray:
-        """
-        Convert raw returns to classification/regression label
-        for 1D time-series model.
-        """
         ret = self.label_dict[self.ret_val_name]
         if self.regression_label == "raw_ret":
             label = np.nan_to_num(ret, nan=-99)
         elif self.regression_label == "vol_adjust_ret":
             label = np.nan_to_num(ret / np.sqrt(self.label_dict["EWMA_vol"]), nan=-99)
         else:
-            # binary classification: up vs down
             label = np.where(ret > 0, 1, 0)
             label = np.nan_to_num(label, nan=-99)
         return label
 
     def filter_data(self, remove_tail: bool) -> None:
-        """
-        Filter out invalid or tail data from the 1D dataset.
-        """
         idx = (self.label != -99) & (self.label_dict["EWMA_vol"] != 0.0)
         if remove_tail:
             last_day_map = {5: "12/24", 20: "12/1", 60: "10/1"}
@@ -421,51 +408,33 @@ class TS1DDataset(Dataset):
             tail_date = pd.Timestamp(f"{last_day}/{self.year}")
             date_arr = pd.to_datetime([str(t) for t in self.label_dict["Date"]])
             idx = idx & (date_arr < tail_date)
-
         self.label = self.label[idx]
         for k in self.label_dict.keys():
             self.label_dict[k] = self.label_dict[k][idx]
         self.images = self.images[idx]
         self.label_dict["StockID"] = self.label_dict["StockID"].astype(str)
         self.label_dict["Date"] = self.label_dict["Date"].astype(str)
-
         assert len(self.label) == len(self.images)
         for k in self.label_dict.keys():
             assert len(self.images) == len(self.label_dict[k])
 
     def _get_1d_mean_std(self) -> list:
-        """
-        Determine the channel-wise mean/std for the 1D time-series.
-        """
         ohlc_len_str = f"_{self.ohlc_len}ohlc" if self.ohlc_len != self.ws else ""
-        raw_suffix = (
-            "" if self.ts_scale == "image_scale"
-            else "_raw_price" if self.ts_scale == "ret_scale"
-            else "_vol_scale"
-        )
-        fname = (
-            f"mean_std_ts1d_{self.ws}d{self.freq}_vbTrue_maTrue_"
-            f"{self.year}{ohlc_len_str}{raw_suffix}.npz"
-        )
-        mean_std_path = op.join(
-            dcf.STOCKS_SAVEPATH,
-            f"stocks_{self.country}_ts",
-            "dataset_all",
-            fname
-        )
-
+        raw_suffix = ("" if self.ts_scale == "image_scale"
+                      else "_raw_price" if self.ts_scale == "ret_scale"
+                      else "_vol_scale")
+        fname = f"mean_std_ts1d_{self.ws}d{self.freq}_vbTrue_maTrue_{self.year}{ohlc_len_str}{raw_suffix}.npz"
+        mean_std_path = op.join(dcf.STOCKS_SAVEPATH, f"stocks_{self.country}_ts", "dataset_all", fname)
         if op.exists(mean_std_path):
             x = np.load(mean_std_path, allow_pickle=True)
             return [x["mean"], x["std"]]
-
-        # apply transformations first if needed
+        # Apply scaling transformations before computing statistics
         if self.ts_scale == "image_scale":
             for i in range(self.images.shape[0]):
                 self.images[i] = self._minmax_scale_ts1d(self.images[i])
         elif self.ts_scale == "vol_scale":
             for i in range(self.images.shape[0]):
                 self.images[i] = self._vol_scale_ts1d(self.images[i]) / np.sqrt(self.label_dict["EWMA_vol"][i])
-
         mean = np.nanmean(self.images, axis=(0, 2))
         std = np.nanstd(self.images, axis=(0, 2))
         np.savez(mean_std_path, mean=mean, std=std)
@@ -473,22 +442,34 @@ class TS1DDataset(Dataset):
 
     def _minmax_scale_ts1d(self, image: np.ndarray) -> np.ndarray:
         """
-        Scale the input channels by min-max scaling to [0, 1].
+        Apply min–max scaling to each channel independently.
+        Expects image shape (6, window_size):
+          - Channels 0–4 (OHLC+MA) and channel 5 (Volume) are scaled separately.
         """
+        assert image.shape == (6, self.ohlc_len)
         out = image.copy()
+        # For channels 0-4 (OHLC and MA)
         ohlcma = out[:5]
-        rng_1 = np.nanmax(ohlcma) - np.nanmin(ohlcma)
-        if rng_1 != 0:
-            out[:5] = (ohlcma - np.nanmin(ohlcma)) / rng_1
-
-        rng_2 = np.nanmax(out[5]) - np.nanmin(out[5])
-        if rng_2 != 0:
-            out[5] = (out[5] - np.nanmin(out[5])) / rng_2
+        min_val = np.nanmin(ohlcma)
+        max_val = np.nanmax(ohlcma)
+        if max_val - min_val != 0:
+            out[:5] = (ohlcma - min_val) / (max_val - min_val)
+        else:
+            out[:5] = 0.0
+        # For volume channel (channel 5)
+        vol = out[5]
+        vol_min = np.nanmin(vol)
+        vol_max = np.nanmax(vol)
+        if vol_max - vol_min != 0:
+            out[5] = (vol - vol_min) / (vol_max - vol_min)
+        else:
+            out[5] = 0.0
         return out
 
     def _vol_scale_ts1d(self, image: np.ndarray) -> np.ndarray:
         """
-        Convert absolute prices to approximate returns by dividing consecutive columns.
+        Alternative scaling: convert price channels into returns.
+        Note: This function sets channel 0 to 0 and computes percentage changes for channels 1-4.
         """
         out = image.copy()
         out[:, 0] = 0
@@ -501,20 +482,19 @@ class TS1DDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         image = self.images[idx].copy()
-        # re-check scale if needed
         if self.ts_scale == "image_scale":
             image = self._minmax_scale_ts1d(image)
         elif self.ts_scale == "vol_scale":
             image = self._vol_scale_ts1d(image) / np.sqrt(self.label_dict["EWMA_vol"][idx])
-
+        # Normalize using pre-computed mean and std (per channel)
         image = (image - self.demean[0].reshape(6, 1)) / self.demean[1].reshape(6, 1)
         image = np.nan_to_num(image, nan=0, posinf=0, neginf=0)
-
         return {
-            "image": image,
+            "image": image,  # shape (6, window_size)
             "label": self.label[idx],
             "ret_val": self.label_dict[self.ret_val_name][idx],
             "ending_date": self.label_dict["Date"][idx],
             "StockID": self.label_dict["StockID"][idx],
             "MarketCap": self.label_dict["MarketCap"][idx]
         }
+

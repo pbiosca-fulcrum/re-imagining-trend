@@ -103,11 +103,6 @@ class GenerateStockData:
         self.df: Union[pd.DataFrame, None] = None
         self.stock_id_list: Union[np.ndarray, None] = None
         
-    def save_annual_ts_data(self) -> None:
-        """
-        Placeholder to generate 1D time-series data if needed. Not fully implemented in this example.
-        """
-        pass
 
     def save_annual_data(self) -> None:
         """
@@ -503,6 +498,180 @@ class GenerateStockData:
         }
         dtype_dict["image"] = np.uint8
         return dtype_dict, feature_list
+    
+
+    def get_ts_feature_and_dtype_list(self):
+        """
+        Returns a tuple (dtype_dict, feature_list) for the TS (1D) data.
+        The features include various return metrics and the predictor.
+        """
+        float32_features = [
+            "EWMA_vol",
+            "Ret",
+            "Ret_5d",
+            "Ret_20d",
+            "Ret_60d",
+            "Ret_week",
+            "Ret_month",
+            "Ret_quarter",
+            "Ret_tstat",
+            "Ret_5d_tstat",
+            "Ret_20d_tstat",
+            "Ret_60d_tstat",
+            "MarketCap",
+            "predictor"  # although predictor will be stored separately, we include it here for completeness
+        ]
+        int8_features = ["Ret_label", "Ret_5d_label", "Ret_20d_label", "Ret_60d_label", "window_size"]
+        object_features = ["StockID"]
+        datetime_features = ["Date"]
+
+        feature_list = float32_features + int8_features + object_features + datetime_features
+        float32_dict = {feature: np.float32 for feature in float32_features}
+        int8_dict = {feature: np.int8 for feature in int8_features}
+        object_dict = {feature: object for feature in object_features}
+        datetime_dict = {feature: "datetime64[ns]" for feature in datetime_features}
+        dtype_dict = {**float32_dict, **int8_dict, **object_dict, **datetime_dict}
+        # Here, we use np.float32 for the predictor array
+        dtype_dict["predictor"] = np.float32
+        return dtype_dict, feature_list
+
+    def generate_daily_ts_features(self, stock_df, date):
+        """
+        Generate the 1D time-series features for a given stock and date.
+        This function is analogous to _generate_daily_features for 2D charts,
+        but here we extract a (6, window_size) array for the TS model.
+        
+        It uses load_adjusted_daily_prices to get a chunk of data, then builds a predictor array
+        by selecting the columns: Open, High, Low, Close, the moving average corresponding to the window, and Vol.
+        The returned dict will have a key "predictor" containing a numpy array of shape (6, window_size).
+        Also, label-related fields (e.g., future returns) are extracted from the last row.
+        
+        Returns:
+            A dict with keys:
+              - "predictor": the (6, window_size) array (float32)
+              - Other features (e.g., "EWMA_vol", "Ret", etc.) taken from the last day.
+              - "window_size": the original window size (int)
+              - "Date": the date (as pd.Timestamp)
+            or an integer error code if something is wrong.
+        """
+        res = self.load_adjusted_daily_prices(stock_df, date)
+        if isinstance(res, int):
+            return res
+        else:
+            df, local_ma_lags = res
+
+        # Build the predictor: we assume the following order for the 6 channels:
+        # Channel 0: Open, 1: High, 2: Low, 3: Close, 4: Moving Average, 5: Vol
+        # For the moving average, we use the moving average for a window equal to self.window_size if available;
+        # if not, you might simply use Close (or zeros).
+        required_cols = ["Open", "High", "Low", "Close", "Vol"]
+        # Initialize predictor with zeros; shape: (6, window_size)
+        predictor = np.zeros((6, self.window_size), dtype=np.float32)
+        # Fill channels 0-3 with Open, High, Low, Close
+        for i, col in enumerate(["Open", "High", "Low", "Close"]):
+            predictor[i, :] = df[col].to_numpy()
+        # For channel 4, try to use the moving average column corresponding to the window size.
+        ma_col = f"ma{self.window_size}"
+        if ma_col in df.columns:
+            predictor[4, :] = df[ma_col].to_numpy()
+        else:
+            # If no MA column exists, fallback (e.g., use Close or zeros)
+            predictor[4, :] = df["Close"].to_numpy()
+        # Channel 5: Volume
+        predictor[5, :] = df["Vol"].to_numpy()
+        
+        # Build label dictionary from the last row
+        last_day = df[df.Date == date].iloc[0]
+        feature_dict = {}
+        # For TS, we include only a subset of features (you can extend this as needed)
+        for feature in ["EWMA_vol", "Ret", "Ret_5d", "Ret_20d", "Ret_60d", "Ret_week", "Ret_month", "Ret_quarter", "MarketCap"]:
+            feature_dict[feature] = last_day[feature]
+        # Create binary labels for returns (for classification)
+        for ret in ["Ret", "Ret_5d", "Ret_20d", "Ret_60d"]:
+            feature_dict[f"{ret}_label"] = 1 if last_day[ret] > 0 else 0
+            vol = last_day.get("EWMA_vol", 0.0)
+            feature_dict[f"{ret}_tstat"] = 0.0 if (vol == 0 or pd.isna(vol)) else last_day[ret] / vol
+        feature_dict["predictor"] = predictor
+        feature_dict["window_size"] = self.window_size
+        feature_dict["Date"] = date
+        return feature_dict
+
+    def save_annual_ts_data(self) -> None:
+        """
+        Generate and save the 1D time-series data (TS) for the current year.
+        It loops over all stocks (self.stock_id_list), calls generate_daily_ts_features,
+        and stores the results (both predictor and label features) in a compressed .npz file.
+        Also writes a log file.
+        """
+        dtype_dict, feature_list = self.get_ts_feature_and_dtype_list()
+        file_name = "{}d_{}_{}_vb_{}_ma_{}_ts".format(
+            self.window_size,
+            self.freq,
+            "has" if self.volume_bar else "no",
+            str(self.ma_lags),
+            self.year,
+        )
+        log_file_name = os.path.join(self.save_dir, "{}.txt".format(file_name))
+        data_filename = os.path.join(self.save_dir, "{}_data_new.npz".format(file_name))
+        if os.path.isfile(log_file_name) and os.path.isfile(data_filename):
+            print("Found pregenerated file {}".format(file_name))
+            return
+
+        data_miss = np.zeros(6, dtype=int)
+        # Preallocate arrays based on an initial capacity guess: num_stocks * 60
+        capacity = len(self.stock_id_list) * 60
+        data_dict = {feature: np.empty(capacity, dtype=dtype_dict[feature]) for feature in feature_list}
+        data_dict["predictor"] = np.empty((capacity, 6, self.window_size), dtype=np.float32)
+        data_dict["predictor"].fill(np.nan)
+
+        sample_num = 0
+        iterator = self.stock_id_list
+        if self.allow_tqdm and ("tqdm" in sys.modules):
+            from tqdm import tqdm
+            iterator = tqdm(self.stock_id_list, desc="Generating TS Data", unit="stock")
+
+        for i, stock_id in enumerate(iterator):
+            # Get data for this stock
+            df = self.df[self.df.StockID == stock_id]
+            df = df.reset_index(drop=True)
+            # Use the column "Ret_{freq}" to decide valid dates
+            valid_dates = df[~pd.isna(df["Ret_{}".format(self.freq)])].Date
+            valid_dates = valid_dates[valid_dates.dt.year == self.year]
+            for j, date in enumerate(valid_dates):
+                try:
+                    predictor_label_data = self.generate_daily_ts_features(df, date)
+                    if isinstance(predictor_label_data, dict):
+                        for feature in feature_list:
+                            data_dict[feature][sample_num] = predictor_label_data[feature]
+                        data_dict["predictor"][sample_num, :, :] = predictor_label_data["predictor"]
+                        sample_num += 1
+                    elif isinstance(predictor_label_data, int):
+                        data_miss[predictor_label_data] += 1
+                    else:
+                        raise ValueError("Unexpected return type from generate_daily_ts_features")
+                except DrawChartError:
+                    continue
+
+        for feature in feature_list:
+            data_dict[feature] = data_dict[feature][:sample_num]
+
+        np.savez_compressed(data_filename, data_dict={x: data_dict[x] for x in data_dict.keys()})
+        with open(log_file_name, "w+") as log_file:
+            log_file.write(
+                "total_dates:%d total_missing:%d type0:%d type1:%d type2:%d type3:%d type4:%d type5:%d" %
+                (
+                    sample_num,
+                    int(np.sum(data_miss)),
+                    data_miss[0],
+                    data_miss[1],
+                    data_miss[2],
+                    data_miss[3],
+                    data_miss[4],
+                    data_miss[5],
+                )
+            )
+        print("Saved TS data to {} and log to {}".format(data_filename, log_file_name))
+
 
 
 if __name__ == "__main__":

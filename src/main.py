@@ -33,7 +33,7 @@ def main() -> None:
     torch.set_num_threads(1)
 
     # Generate synthetic bar chart data for a range of years
-    year_list = list(range(1993, 2025))
+    year_list = list(range(1993, 2001))
     chart_type = "bar"
     window_size = 5
     freq = "week"
@@ -58,7 +58,7 @@ def main() -> None:
         # dgp_obj.save_annual_data()
         dgp_obj.save_annual_data_parallel()
         # Generate CNN1D Data
-        dgp_obj.save_annual_ts_data()
+        # dgp_obj.save_annual_ts_data()
 
     # Train CNN models (U.S. example)
     # CNN2D
