@@ -35,7 +35,6 @@ class PortfolioManager:
         self.start_year = start_year
         self.end_year = end_year
         self.country = country
-        # For the base case, we handle 0 delay by default.
         self.delay_list = [0] if delay_list is None else delay_list
         self.custom_ret = custom_ret
         self.transaction_cost = transaction_cost
@@ -51,41 +50,71 @@ class PortfolioManager:
             self.signal_df = None
 
     def __add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
+        """Joins signal_df with the period returns, ensuring we have a MultiIndex of (Date, StockID)."""
+
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
-        
-        # Ensure period_ret has a MultiIndex of [Date, StockID]
+
+        # Ensure signal_df is multi-index on ['Date','StockID']
+        if not isinstance(signal_df.index, pd.MultiIndex):
+            signal_df = signal_df.set_index(["Date", "StockID"])
+
+        # Ensure period_ret is also multi-index
         if not isinstance(period_ret.index, pd.MultiIndex):
             period_ret = period_ret.set_index(["Date", "StockID"])
-        
-        # Filter for dates after 2000
+            print(f"[DEBUG] period_ret converted to MultiIndex with names: {period_ret.index.names}")
+
+        # Sometimes date/time or StockID types differ.
+        # Normalize dates (drop time) and ensure StockID is str in both DataFrames.
+        signal_df = signal_df.copy()
+        signal_df.index = signal_df.index.set_levels([
+            pd.to_datetime(signal_df.index.levels[0]).normalize(),
+            signal_df.index.levels[1].astype(str)
+        ], level=[0, 1])
+
+        period_ret = period_ret.copy()
+        period_ret.index = period_ret.index.set_levels([
+            pd.to_datetime(period_ret.index.levels[0]).normalize(),
+            period_ret.index.levels[1].astype(str)
+        ], level=[0, 1])
+
+        # Debug prints
+        print(f"[DEBUG] signal_df index: {signal_df.index.names}, n={len(signal_df)}")
+        print(f"[DEBUG] period_ret index: {period_ret.index.names}, n={len(period_ret)}")
+
+        # Filter period_ret for dates after 2000
         period_ret = period_ret[period_ret.index.get_level_values("Date").year > 2000]
+
+        # We want to merge 'MarketCap' and next_{freq}_ret_{dl}delay columns
         columns = ["MarketCap"] + [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
         if self.custom_ret is not None:
             columns.append(self.custom_ret)
 
         print(f"[DEBUG] Merging signal_df with period_ret columns: {columns}")
         print(f"[DEBUG] signal_df has {len(signal_df)} samples before merging.")
-        print(f"[DEBUG] signal_df index: {signal_df.index.names}")
         print(f"[DEBUG] signal_df columns: {signal_df.columns}")
         print(f"[DEBUG] signal_df.head():\n{signal_df.head()}")
-        
         print(f"[DEBUG] --------------------------------------")
-        
+
+        # Rename period_ret's MarketCap to avoid column name clashes
         period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
-        
-        print(f"[DEBUG] period_ret has {len(period_ret)} samples.")
-        print(f"[DEBUG] period_ret index: {period_ret.index.names}")
         print(f"[DEBUG] period_ret columns: {period_ret.columns}")
         print(f"[DEBUG] period_ret.head():\n{period_ret.head()}")
-        
-        
 
-        merged_df = signal_df.join(period_ret[[ "MC_from_ret", f"next_{self.freq}_ret_0delay" ]], how="inner")
+        # Inner join on the MultiIndex
+        merged_df = signal_df.join(
+            period_ret[["MC_from_ret", f"next_{self.freq}_ret_0delay"]],
+            how="inner"
+        )
 
-        # For convenience, define a base 'no_delay_ret_name'
+        # Our "no delay" return column
         merged_df[self.no_delay_ret_name] = merged_df[f"next_{self.freq}_ret_0delay"]
-        
-        # Finally, drop rows that are still missing any of these columns
+
+        print(f"[DEBUG] Merged DataFrame columns: {merged_df.columns}")
+        print(f"[DEBUG] Merged DataFrame head:\n{merged_df.head()}")
+        print(f"[DEBUG] Merged DataFrame shape: {merged_df.shape}")
+        print(f"[DEBUG] --------------------------------------")
+
+        # Drop rows missing required columns (MarketCap, etc.)
         merged_df.dropna(subset=columns, inplace=True)
         merged_df.dropna(subset=[self.no_delay_ret_name], inplace=True)
 
@@ -101,13 +130,13 @@ class PortfolioManager:
                     f"[DEBUG] {len(merged_df)} samples, {dl} delay "
                     f"nan values={nan_count}, zero values={zero_count}"
                 )
+
         return merged_df
+
 
     def get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         filtered_df = signal_df[
-            signal_df.index.get_level_values("Date").year.isin(
-                range(self.start_year, self.end_year + 1)
-            )
+            signal_df.index.get_level_values("Date").year.isin(range(self.start_year, self.end_year + 1))
         ]
 
         if filtered_df.empty:
@@ -119,6 +148,7 @@ class PortfolioManager:
 
         final_df = self.__add_period_ret_to_us_res_df_w_delays(filtered_df)
 
+        # Additional filtering for typical US stock data
         if self.country not in ["future", "new_future"]:
             final_df["MarketCap"] = final_df["MarketCap"].abs()
             final_df = final_df[~final_df["MarketCap"].isnull() & (final_df["MarketCap"] > 0)]
@@ -184,7 +214,7 @@ class PortfolioManager:
             else:
                 pf_filter = (up_prob_series > low_quantile) & (up_prob_series <= high_quantile)
 
-            decile_subset = reb_df[pf_filter].copy()
+            decile_subset = rebalance_df[pf_filter].copy()
             if decile_subset.empty:
                 decile_subset["weight"] = 0.0
                 decile_subset["inv_ret"] = 0.0
@@ -287,13 +317,9 @@ class PortfolioManager:
         """
         ret_name = "nxt_freq_ewret" if weight_type == "ew" else "nxt_freq_vwret"
         df = portfolio_ret.copy()
-        # Rename columns for clarity:
-        df.columns = (
-            ["Low(L)"] + [str(i) for i in range(2, cut)] + ["High(H)", "H-L"]
-        )
+        df.columns = ["Low(L)"] + [str(i) for i in range(2, cut)] + ["High(H)", "H-L"]
 
         spy = eqd.get_spy_freq_rets(self.freq)
-
         if ret_name not in spy.columns:
             print(f"[DEBUG] Could not find {ret_name} in SPY columns => using placeholder 'SPY' naming only.")
             df["SPY"] = spy[spy.columns[-1]]
@@ -302,29 +328,25 @@ class PortfolioManager:
 
         df.dropna(inplace=True)
 
-        # Compute cumulative returns as log-cumulative returns
         log_ret_df = pd.DataFrame(index=df.index)
         for column in df.columns:
             log_ret_df[column] = self._ret_to_cum_log_ret(df[column])
-        
-        # Insert a starting point for previous year's end if needed
-        top_col_name, bottom_col_name = ("High(H)", "Low(L)")
-        prev_year = pd.to_datetime(log_ret_df.index[0]).year - 1
-        prev_day = pd.to_datetime(f"{prev_year}-12-31")
-        log_ret_df.loc[prev_day] = [0] * len(log_ret_df.columns)
-        log_ret_df.sort_index(inplace=True)
 
-        # Select only the key columns to plot
-        # Here we plot: "Low(L)", "High(H)", "H-L" and "SPY"
+        # Insert a starting point for previous year's end if needed
+        if len(log_ret_df) > 0:
+            prev_year = pd.to_datetime(log_ret_df.index[0]).year - 1
+            prev_day = pd.to_datetime(f"{prev_year}-12-31")
+            log_ret_df.loc[prev_day] = [0] * len(log_ret_df.columns)
+            log_ret_df.sort_index(inplace=True)
+
         plot_cols = ["Low(L)", "High(H)", "H-L", "SPY"]
         log_ret_df = log_ret_df[plot_cols]
-        
-        # Define custom colours for each column:
+
         custom_colors = {
-            "Low(L)": "darkred",   # decile 0 in red
-            "High(H)": "darkgreen",# decile 9 in green
-            "H-L": "darkblue",     # H-L in blue
-            "SPY": "gray"          # SPY in gray
+            "Low(L)": "darkred",
+            "High(H)": "darkgreen",
+            "H-L": "darkblue",
+            "SPY": "gray"
         }
         
         plt.figure(figsize=(10, 6))
@@ -363,7 +385,7 @@ class PortfolioManager:
         index_names = ["Low"] + list(map(str, range(2, int(cut)))) + ["High", "H-L"]
         summary_df = summary_df.set_index(pd.Index(index_names))
 
-        freq_factor = 0.25 if self.freq == "week" else 1 if self.freq == "month" else 3
+        freq_factor = 0.25 if self.freq == "week" else (1 if self.freq == "month" else 3)
         turnover_annualized = turnover / freq_factor
         summary_df.loc["Turnover", :] = [np.nan, np.nan, turnover_annualized]
 
@@ -376,9 +398,7 @@ class PortfolioManager:
                 "signal_df is empty or None. There's no data to generate portfolios. "
                 "Check if your CSV had rows in the date range."
             )
-        assert delay in self.delay_list, (
-            f"Delay {delay} is not in {self.delay_list}."
-        )
+        assert delay in self.delay_list, f"Delay {delay} is not in {self.delay_list}."
 
         for weight_type in ["ew", "vw"]:
             pf_name = self.get_portfolio_name(weight_type, delay, cut)
@@ -405,26 +425,26 @@ class PortfolioManager:
             
             print(f"[INFO] Portfolio '{pf_name}' results saved to:\n  - {pf_data_path}\n  - {smry_path}")
             
-            # --- New Functionality: Generate Plots ---
+            # --- Plotting ---
             from src.portfolio import plot_portfolio_performance as ppp
             plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
             print(f"[INFO] Generating cumulative returns plots for portfolio '{pf_name}'...")
-            # Generate individual yearly plots
             ppp.plot_all_years_cumulative_returns(portfolio_ret, plots_dir, weight_type)
             print(f"[INFO] Cumulative returns yearly plots saved in {plots_dir}")
             
-            # Generate combined plot for all years with collapse shading
             combined_plot_path = os.path.join(plots_dir, f"combined_cumulative_returns_{pf_name}.png")
-            # Define collapse periods (adjust these dates as needed)
             collapse_periods = [
                 (pd.Timestamp("2007-10-01"), pd.Timestamp("2009-03-01"), "GFC"),
                 (pd.Timestamp("2020-02-20"), pd.Timestamp("2020-03-23"), "COVID")
             ]
-            ppp.plot_all_returns_with_shading(portfolio_ret, combined_plot_path, collapse_periods,
-                                               title=f"Combined Cumulative Returns ({weight_type.upper()})")
+            ppp.plot_all_returns_with_shading(
+                portfolio_ret,
+                combined_plot_path,
+                collapse_periods,
+                title=f"Combined Cumulative Returns ({weight_type.upper()})"
+            )
             print(f"[INFO] Combined cumulative returns plot with shaded collapse periods saved at {combined_plot_path}")
             
-            # --- New Functionality: Assess Annual Performance ---
             print(f"[INFO] Assessing annual performance for portfolio '{pf_name}'...")
             annual_perf = ppp.assess_yearly_performance(portfolio_ret)
             annual_perf_path = os.path.join(self.portfolio_dir, f"{pf_name}_annual_performance.csv")
@@ -443,7 +463,6 @@ class PortfolioManager:
     def load_portfolio_ret(self, weight_type: str, cut: int = 10, delay: int = 0) -> pd.DataFrame:
         pf_name = self.get_portfolio_name(weight_type, delay, cut)
         data_dir = op.join(self.portfolio_dir, "pf_data")
-
         pf_path = op.join(data_dir, f"pf_data_{pf_name}.csv")
         if not op.isfile(pf_path):
             pf_path = op.join(data_dir, f"pf_data_{pf_name}_100.csv")
