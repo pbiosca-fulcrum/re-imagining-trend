@@ -68,6 +68,18 @@ def processed_us_data() -> pd.DataFrame:
         df.sort_index(inplace=True)
         print(f"Done loading in {(time.time() - since):.2f} sec")
         print(f"Data columns: {df.columns.tolist()}  shape={df.shape}")
+
+        # Recompute period returns parquet files (week, month, quarter)
+        for freq in ["week", "month", "quarter"]:
+            col = f"Ret_{freq}"
+            if col in df.columns:
+                ret_df = df[df[col].notna()][["MarketCap", col]].reset_index()
+                new_name = f"next_{freq}_ret_0delay"
+                ret_df = ret_df.rename(columns={col: new_name})
+                ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_crsp_ret.pq")
+                ret_df.to_parquet(ret_pq_path, index=False)
+                print(f"Saved period returns for {freq} to {ret_pq_path}")
+
         return df
 
     # Otherwise, read raw CSV in chunks
@@ -207,7 +219,19 @@ def processed_us_data() -> pd.DataFrame:
         df_out = None
         gc.collect()
 
+    # Store period returns parquet files (week, month, quarter)
+    for freq in ["week", "month", "quarter"]:
+        col = f"Ret_{freq}"
+        if col in df.columns:
+            ret_df = df[df[col].notna()][["MarketCap", col]].reset_index()
+            new_name = f"next_{freq}_ret_0delay"
+            ret_df = ret_df.rename(columns={col: new_name})
+            ret_pq_path = op.join(str(dcf.CACHE_DIR), f"us_{freq}_crsp_ret.pq")
+            ret_df.to_parquet(ret_pq_path, index=False)
+            print(f"Saved period returns for {freq} to {ret_pq_path}")
+
     return df.copy()
+
 
 def get_spy_freq_rets(freq: str) -> pd.DataFrame:
     """
