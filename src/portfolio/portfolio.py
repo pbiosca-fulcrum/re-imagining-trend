@@ -267,6 +267,27 @@ class PortfolioManager:
 
             sell_decile[["weight", "inv_ret"]] = sell_decile[["weight", "inv_ret"]] * (-1)
             to_df = pd.concat([sell_decile, buy_decile]) if not buy_decile.empty else sell_decile
+            
+            # Debug to_df
+            print(f"[DEBUG] to_df (rebalance_df) at date {d}:")
+            print(to_df.head(10))
+            print(f"[DEBUG] to_df shape: {to_df.shape}")
+            print(f"[DEBUG] to_df columns: {to_df.columns}")
+            print(f"[DEBUG] to_df index: {to_df.index}")
+            
+            # Debug prev_to_df
+            print(f"---------------------------------------")
+            breakpoint()
+            
+            # ---- FIX FOR DUPLICATES / REINDEX ERROR ----
+            # If duplicates exist in to_df or prev_to_df (same index label repeated),
+            # pandas reindex can choke. Summation or dedup is often correct for turnover.
+            if not to_df.empty:
+                to_df = to_df.groupby(to_df.index).sum()
+            if i > 0 and prev_to_df is not None and not prev_to_df.empty:
+                prev_to_df = prev_to_df.groupby(prev_to_df.index).sum()
+            # ------------------------------------------
+            
             if i > 0 and prev_to_df is not None:
                 all_idx = np.unique(list(to_df.index) + list(prev_to_df.index))
                 tto_df = pd.DataFrame(index=all_idx)
@@ -379,7 +400,7 @@ class PortfolioManager:
 
         res[:, 0] = avg * period
         res[:, 1] = std * math.sqrt(period)
-        res[:, 2] = res[:, 0] / (res[:, 1] + 1e-12)
+        res[:, 2] = res[:, 0] / (res[:, 1])
 
         summary_df = pd.DataFrame(res, columns=["ret", "std", "SR"])
         index_names = ["Low"] + list(map(str, range(2, int(cut)))) + ["High", "H-L"]
