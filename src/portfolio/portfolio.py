@@ -1,4 +1,3 @@
-# src/portfolio/portfolio.py
 import os
 import os.path as op
 import pdb
@@ -72,15 +71,16 @@ class PortfolioManager:
         
         print(f"[DEBUG] --------------------------------------")
         
+        period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
         
         print(f"[DEBUG] period_ret has {len(period_ret)} samples.")
         print(f"[DEBUG] period_ret index: {period_ret.index.names}")
         print(f"[DEBUG] period_ret columns: {period_ret.columns}")
         print(f"[DEBUG] period_ret.head():\n{period_ret.head()}")
         
-        period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
+        
 
-        merged_df = signal_df.join(period_ret[["MC_from_ret", "next_week_ret_0delay"]], how="inner")
+        merged_df = signal_df.join(period_ret[[ "MC_from_ret", f"next_{self.freq}_ret_0delay" ]], how="inner")
 
         # For convenience, define a base 'no_delay_ret_name'
         merged_df[self.no_delay_ret_name] = merged_df[f"next_{self.freq}_ret_0delay"]
@@ -184,7 +184,7 @@ class PortfolioManager:
             else:
                 pf_filter = (up_prob_series > low_quantile) & (up_prob_series <= high_quantile)
 
-            decile_subset = rebalance_df[pf_filter].copy()
+            decile_subset = reb_df[pf_filter].copy()
             if decile_subset.empty:
                 decile_subset["weight"] = 0.0
                 decile_subset["inv_ret"] = 0.0
@@ -324,7 +324,7 @@ class PortfolioManager:
             "Low(L)": "darkred",   # decile 0 in red
             "High(H)": "darkgreen",# decile 9 in green
             "H-L": "darkblue",     # H-L in blue
-            "SPY": "gray"      # SPY in gray
+            "SPY": "gray"          # SPY in gray
         }
         
         plt.figure(figsize=(10, 6))
