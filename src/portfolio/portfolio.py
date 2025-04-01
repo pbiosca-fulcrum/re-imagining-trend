@@ -65,11 +65,18 @@ class PortfolioManager:
             columns.append(self.custom_ret)
 
         print(f"[DEBUG] Merging signal_df with period_ret columns: {columns}")
-        print(f"[DEBUG] signal_df has {len(signal_df)} samples, period_ret has {len(period_ret)} samples.")
-        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
-        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
+        print(f"[DEBUG] signal_df has {len(signal_df)} samples before merging.")
         print(f"[DEBUG] signal_df index: {signal_df.index.names}")
+        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
+        print(f"[DEBUG] signal_df.head():\n{signal_df.head()}")
+        
+        print(f"[DEBUG] --------------------------------------")
+        
+        
+        print(f"[DEBUG] period_ret has {len(period_ret)} samples.")
         print(f"[DEBUG] period_ret index: {period_ret.index.names}")
+        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
+        print(f"[DEBUG] period_ret.head():\n{period_ret.head()}")
         
         period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
 
