@@ -27,6 +27,10 @@ from torch.backends import cudnn
 from torch.utils.data import DataLoader, ConcatDataset, random_split
 from tqdm import tqdm
 
+import wandb
+wandb.login(key="f5970b98b3b6d6716c991076efe444d5ceca996e")
+
+
 from src.model import cnn_model
 from src.portfolio import portfolio as pf
 from src.utils.config import (
@@ -269,9 +273,23 @@ class Experiment:
     def train_single_model(self, dataloaders_dict, model_save_path, model_num=None):
         """
         Train a single model, returning the best validation metrics and final train metrics.
+        This version now uses wandb to log training and validation metrics per epoch.
         """
+        # Initialize wandb run for this model training
+        wandb.init(project="trend_cnn",
+                   name=f"{self.exp_name}_model_{model_num}",
+                   config={
+                       "ws": self.ws,
+                       "pw": self.pw,
+                       "lr": self.lr,
+                       "drop_prob": self.drop_prob,
+                       "max_epoch": self.max_epoch,
+                       "batch_norm": self.model_obj.batch_norm,
+                       "lrelu": self.model_obj.lrelu,
+                       "device": str(self.device),
+                   })
+
         if self.country != "USA" and self.tl is not None:
-            # e.g. load pretrained from 'usa' or do 'ft' logic
             us_model_save_path = model_save_path.replace(f"-{self.country}-{self.tl}", "")
             model_state_dict = torch.load(us_model_save_path, map_location=self.device)["model_state_dict"]
             model = self.model_obj.init_model_with_model_state_dict(model_state_dict, device=self.device)
@@ -280,6 +298,7 @@ class Experiment:
                 validate_metrics = self.evaluate(model, {"validate": dataloaders_dict["validate"]})["validate"]
                 validate_metrics["epoch"] = 0
                 self.release_dataloader_memory(dataloaders_dict, model)
+                wandb.finish()
                 return None, validate_metrics, None
 
             elif self.tl == "ft":
@@ -292,7 +311,6 @@ class Experiment:
             else:
                 raise ValueError(f"{self.tl} not supported.")
         else:
-            # Normal new model init
             model = self.model_obj.init_model(device=self.device)
             optimizer = optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
@@ -301,7 +319,10 @@ class Experiment:
         best_model = copy.deepcopy(model.state_dict())
         since = time.time()
 
+        # Training loop
         for epoch in range(self.max_epoch):
+            train_epoch_stat = None
+            val_epoch_stat = None
             for phase in ["train", "validate"]:
                 if phase == "train":
                     model.train()
@@ -328,7 +349,7 @@ class Experiment:
                     with torch.set_grad_enabled(phase == "train"):
                         outputs = model(inputs)
                         loss = self.loss_from_model_output(labels, outputs)
-                        xx, preds = torch.max(outputs, 1)
+                        _, preds = torch.max(outputs, 1)
                         if phase == "train":
                             optimizer.zero_grad()
                             loss.backward()
@@ -340,14 +361,28 @@ class Experiment:
                 epoch_stat = self._generate_epoch_stat(
                     epoch, self.lr, len(dataloaders_dict[phase].dataset), running_metrics
                 )
-                if self.enable_tqdm and hasattr(data_iter, "set_postfix"):
-                    data_iter.set_postfix(epoch_stat)
-                print(epoch_stat)
+                print(f"{phase.upper()} => {epoch_stat}")
 
-                if phase == "validate" and epoch_stat["loss"] < best_validate_metrics["loss"]:
-                    for key in ["loss", "accy", "MCC", "epoch", "diff"]:
-                        best_validate_metrics[key] = epoch_stat[key]
-                    best_model = copy.deepcopy(model.state_dict())
+                if phase == "train":
+                    train_epoch_stat = epoch_stat
+                else:
+                    val_epoch_stat = epoch_stat
+                    if epoch_stat["loss"] < best_validate_metrics["loss"]:
+                        for key in ["loss", "accy", "MCC", "epoch", "diff"]:
+                            best_validate_metrics[key] = epoch_stat[key]
+                        best_model = copy.deepcopy(model.state_dict())
+
+            # Log both training and validation metrics at the end of the epoch
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_epoch_stat["loss"],
+                "train_acc": train_epoch_stat["accy"],
+                "train_MCC": train_epoch_stat["MCC"],
+                "validate_loss": val_epoch_stat["loss"],
+                "validate_acc": val_epoch_stat["accy"],
+                "validate_MCC": val_epoch_stat["MCC"],
+                "learning_rate": epoch_stat["lr"]
+            })
 
             if self.early_stop and (epoch - best_validate_metrics["epoch"]) >= 2:
                 break
@@ -364,6 +399,8 @@ class Experiment:
         train_metrics["epoch"] = best_validate_metrics["epoch"]
         self.release_dataloader_memory(dataloaders_dict, model)
 
+        # Finish wandb run
+        wandb.finish()
         del best_validate_metrics["model_state_dict"]
         return train_metrics, best_validate_metrics, model
 

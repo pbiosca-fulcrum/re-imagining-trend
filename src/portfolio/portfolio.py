@@ -268,16 +268,34 @@ class PortfolioManager:
             sell_decile[["weight", "inv_ret"]] = sell_decile[["weight", "inv_ret"]] * (-1)
             to_df = pd.concat([sell_decile, buy_decile]) if not buy_decile.empty else sell_decile
             
-            # Debug to_df
-            print(f"[DEBUG] to_df (rebalance_df) at date {d}:")
-            print(to_df.head(10))
-            print(f"[DEBUG] to_df shape: {to_df.shape}")
-            print(f"[DEBUG] to_df columns: {to_df.columns}")
-            print(f"[DEBUG] to_df index: {to_df.index}")
-            
-            # Debug prev_to_df
-            print(f"---------------------------------------")
-            breakpoint()
+            # # Debug to_df and identify duplicated indices
+            # if not to_df.empty:
+            #     duplicated_indices = to_df.index[to_df.index.duplicated()].unique()
+            #     print(f"[DEBUG] to_df at date {d}, shape: {to_df.shape}")
+            #     print(f"[DEBUG] to_df columns: {to_df.columns}")
+            #     if len(duplicated_indices) > 0:
+            #         print(f"[DEBUG] DUPLICATED INDICES in to_df: {len(duplicated_indices)} unique values")
+            #         print(f"[DEBUG] First 10 duplicated indices: {duplicated_indices[:10]}")
+            #         for idx in duplicated_indices[:5]:  # Show first 5 duplicates in detail
+            #             print(f"[DEBUG] Rows for duplicated index '{idx}':\n{to_df.loc[idx]}")
+            #     else:
+            #         print(f"[DEBUG] No duplicated indices in to_df")
+
+            # # Debug prev_to_df and identify duplicated indices
+            # if i > 0 and prev_to_df is not None and not prev_to_df.empty:
+            #     duplicated_indices = prev_to_df.index[prev_to_df.index.duplicated()].unique()
+            #     print(f"[DEBUG] prev_to_df at previous date, shape: {prev_to_df.shape}")
+            #     print(f"[DEBUG] prev_to_df columns: {prev_to_df.columns}")
+            #     if len(duplicated_indices) > 0:
+            #         print(f"[DEBUG] DUPLICATED INDICES in prev_to_df: {len(duplicated_indices)} unique values")
+            #         print(f"[DEBUG] First 10 duplicated indices: {duplicated_indices[:10]}")
+            #         for idx in duplicated_indices[:5]:  # Show first 5 duplicates in detail
+            #             print(f"[DEBUG] Rows for duplicated index '{idx}':\n{prev_to_df.loc[idx]}")
+            #     else:
+            #         print(f"[DEBUG] No duplicated indices in prev_to_df")
+
+            # print("---------------------------------------")
+            # breakpoint()
             
             # ---- FIX FOR DUPLICATES / REINDEX ERROR ----
             # If duplicates exist in to_df or prev_to_df (same index label repeated),
