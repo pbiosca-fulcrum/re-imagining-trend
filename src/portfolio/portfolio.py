@@ -1,3 +1,4 @@
+# src/portfolio/portfolio.py
 import os
 import os.path as op
 import pdb
@@ -5,6 +6,7 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from src.utils import utilities as ut
 from src.data import equity_data as eqd
@@ -40,9 +42,7 @@ class PortfolioManager:
         self.transaction_cost = transaction_cost
         self.no_delay_ret_name = f"next_{freq}_ret"
         
-        # If we are loading the signal, attach period returns to that DataFrame:
         if load_signal:
-            # Must contain "up_prob" and "MarketCap"
             if "up_prob" not in signal_df.columns:
                 raise ValueError("signal_df must have an 'up_prob' column if load_signal=True.")
             self.signal_df = self.get_up_prob_with_period_ret(signal_df)
@@ -50,21 +50,14 @@ class PortfolioManager:
             self.signal_df = None
 
     def __add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
-        """Joins signal_df with the period returns, ensuring we have a MultiIndex of (Date, StockID)."""
-
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
 
-        # Ensure signal_df is multi-index on ['Date','StockID']
         if not isinstance(signal_df.index, pd.MultiIndex):
             signal_df = signal_df.set_index(["Date", "StockID"])
 
-        # Ensure period_ret is also multi-index
         if not isinstance(period_ret.index, pd.MultiIndex):
             period_ret = period_ret.set_index(["Date", "StockID"])
-            print(f"[DEBUG] period_ret converted to MultiIndex with names: {period_ret.index.names}")
 
-        # Sometimes date/time or StockID types differ.
-        # Normalize dates (drop time) and ensure StockID is str in both DataFrames.
         signal_df = signal_df.copy()
         signal_df.index = signal_df.index.set_levels([
             pd.to_datetime(signal_df.index.levels[0]).normalize(),
@@ -77,28 +70,16 @@ class PortfolioManager:
             period_ret.index.levels[1].astype(str)
         ], level=[0, 1])
 
-        # Debug prints
-        print(f"[DEBUG] signal_df index: {signal_df.index.names}, n={len(signal_df)}")
-        print(f"[DEBUG] period_ret index: {period_ret.index.names}, n={len(period_ret)}")
-
-        # Filter period_ret for dates after 2000
+        signal_df = signal_df[
+            signal_df.index.get_level_values("Date").year.isin(range(self.start_year, self.end_year + 1))
+        ]
         period_ret = period_ret[period_ret.index.get_level_values("Date").year > 2000]
 
-        # We want to merge 'MarketCap' and next_{freq}_ret_{dl}delay columns
         columns = ["MarketCap"] + [f"next_{self.freq}_ret_{dl}delay" for dl in self.delay_list]
         if self.custom_ret is not None:
             columns.append(self.custom_ret)
 
-        print(f"[DEBUG] Merging signal_df with period_ret columns: {columns}")
-        print(f"[DEBUG] signal_df has {len(signal_df)} samples before merging.")
-        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
-        print(f"[DEBUG] signal_df.head():\n{signal_df.head()}")
-        print(f"[DEBUG] --------------------------------------")
-
-        # Rename period_ret's MarketCap to avoid column name clashes
         period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
-        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
-        print(f"[DEBUG] period_ret.head():\n{period_ret.head()}")
 
         # Inner join on the MultiIndex
         merged_df = signal_df.join(
@@ -122,36 +103,134 @@ class PortfolioManager:
         for dl in self.delay_list:
             dl_ret_name = f"next_{self.freq}_ret_{dl}delay"
             if dl_ret_name not in merged_df.columns:
-                print(f"[DEBUG] Delayed return column {dl_ret_name} not found after merge.")
+                pass
             else:
-                nan_count = merged_df[dl_ret_name].isna().sum()
-                zero_count = (merged_df[dl_ret_name] == 0).sum()
-                print(
-                    f"[DEBUG] {len(merged_df)} samples, {dl} delay "
-                    f"nan values={nan_count}, zero values={zero_count}"
-                )
+                pass
 
         return merged_df
-
 
     def get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         filtered_df = signal_df[
             signal_df.index.get_level_values("Date").year.isin(range(self.start_year, self.end_year + 1))
         ]
-
         if filtered_df.empty:
-            print(
-                f"[DEBUG] After date filtering from year {self.start_year} to {self.end_year}, "
-                f"the signal df has {filtered_df.shape[0]} rows (i.e. empty)."
-            )
             return filtered_df
 
         final_df = self.__add_period_ret_to_us_res_df_w_delays(filtered_df)
 
-        # Additional filtering for typical US stock data
         if self.country not in ["future", "new_future"]:
             final_df["MarketCap"] = final_df["MarketCap"].abs()
             final_df = final_df[~final_df["MarketCap"].isnull() & (final_df["MarketCap"] > 0)]
+
+        # Do some statistics on what the distribution of market cap looks like and save it by year
+        if not final_df.empty:
+            # Reset index to get Date as a column
+            df_reset = final_df.reset_index()
+            df_reset['Year'] = pd.DatetimeIndex(df_reset['Date']).year
+            
+            # For each year, get the last market cap for each stock
+            yearly_market_caps = {}
+            for year in range(self.start_year, self.end_year + 1):
+                year_df = df_reset[df_reset['Year'] == year]
+            if not year_df.empty:
+                # Get the last observation for each StockID in this year
+                last_obs = year_df.sort_values('Date').groupby('StockID').last()
+                yearly_market_caps[year] = last_obs['MarketCap']
+            
+            # Create overall plot with subplots for each year
+            num_years = self.end_year - self.start_year + 1
+            cols = min(3, num_years)
+            rows = (num_years + cols - 1) // cols
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(15, rows * 4))
+            if rows == 1 and cols == 1:
+                axes = np.array([[axes]])
+            elif rows == 1 or cols == 1:
+                axes = axes.reshape(-1, 1) if cols == 1 else axes.reshape(1, -1)
+            
+            year_idx = 0
+            for year, market_caps in sorted(yearly_market_caps.items()):
+                row, col = divmod(year_idx, cols)
+                ax = axes[row, col]
+            
+            # Use log scale for MarketCap
+            log_market_cap = np.log10(market_caps)
+            ax.hist(log_market_cap, bins=40, alpha=0.7, color='steelblue', edgecolor='black')
+            ax.set_xlabel('Market Cap (log10 scale)')
+            ax.set_ylabel('Frequency')
+            ax.set_title(f'Market Cap Distribution - {year}')
+            
+            # Add vertical lines for common market cap thresholds
+            thresholds = [1e6, 1e7, 1e8, 1e9, 1e10]
+            labels = ['$1M', '$10M', '$100M', '$1B', '$10B']
+            for threshold, label in zip(thresholds, labels):
+                ax.axvline(np.log10(threshold), color='red', linestyle='--', alpha=0.7)
+                ax.text(np.log10(threshold), ax.get_ylim()[1]*0.9, label, 
+                   rotation=90, verticalalignment='top', fontsize=8)
+            
+            # Add summary statistics as text
+            stats = (f"N: {len(market_caps)}\n"
+                   f"Mean: ${market_caps.mean()/1e9:.2f}B\n"
+                   f"Median: ${market_caps.median()/1e9:.2f}B\n"
+                   f"Min: ${market_caps.min()/1e6:.2f}M\n"
+                   f"Max: ${market_caps.max()/1e9:.2f}B")
+            ax.text(0.02, 0.95, stats, transform=ax.transAxes, 
+                  bbox=dict(facecolor='white', alpha=0.8), fontsize=8)
+            
+            year_idx += 1
+            
+            # Hide any unused subplots
+            for i in range(year_idx, rows * cols):
+                row, col = divmod(i, cols)
+                axes[row, col].axis('off')
+            
+            plt.tight_layout()
+            os.makedirs(op.join(self.portfolio_dir, 'analysis'), exist_ok=True)
+            plt.savefig(op.join(self.portfolio_dir, 'analysis', f'market_cap_by_year_{self.country}.png'))
+            plt.close()
+            
+            # Also create a single plot with all years for comparison
+            plt.figure(figsize=(12, 8))
+            for year, market_caps in sorted(yearly_market_caps.items()):
+            # Plot each year as a line showing the distribution
+                sns_data = pd.DataFrame({'MarketCap': np.log10(market_caps), 'Year': str(year)})
+                sns.kdeplot(data=sns_data, x='MarketCap', label=f'{year} (n={len(market_caps)})')
+            
+            plt.xlabel('Market Cap (log10 scale)')
+            plt.ylabel('Density')
+            plt.title(f'Market Cap Distribution by Year ({self.country})')
+            
+            # Add vertical lines for common thresholds
+            for threshold, label in zip(thresholds, labels):
+                plt.axvline(np.log10(threshold), color='gray', linestyle=':', alpha=0.5)
+                plt.text(np.log10(threshold), plt.ylim()[1]*0.95, label, 
+                    rotation=90, verticalalignment='top', fontsize=8)
+            
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(op.join(self.portfolio_dir, 'analysis', f'market_cap_yearly_comparison_{self.country}.png'))
+            plt.close()
+
+        # Added filters:
+        # Log final_df
+        print(f"[DEBUG] Final DataFrame columns: {final_df.head(20)}")
+        
+        # # Filter for top 20% largest companies by MarketCap for each year
+        # final_df = final_df.reset_index()
+        # final_df['Year'] = pd.DatetimeIndex(final_df['Date']).year
+        
+        # # Group by year and keep only top 20% by market cap
+        # def top_quintile(group):
+        #     threshold = group['MarketCap'].quantile(0.5)  # 80th percentile (top 20%)
+        #     return group[group['MarketCap'] < threshold]
+        
+        # final_df = final_df.groupby('Year').apply(top_quintile).reset_index(drop=True)
+        # final_df = final_df.set_index(['Date', 'StockID'])
+        
+        # print(f"[DEBUG] Filtered DataFrame columns: {final_df.head(20)}")
+        # breakpoint()
+        # if "Vol" in final_df.columns:
+        #     final_df = final_df[final_df["Vol"] >= 1e6]     # >= 1 million daily volume
 
         return final_df
 
@@ -165,7 +244,6 @@ class PortfolioManager:
         assert delay in self.delay_list, f"delay={delay} not in the allowed list: {self.delay_list}"
 
         if self.custom_ret:
-            print(f"[DEBUG] Using custom return column={self.custom_ret}")
             ret_name = self.custom_ret
         else:
             ret_name = (
@@ -187,12 +265,6 @@ class PortfolioManager:
                 "[ERROR] The final data has no valid Dates. Possibly the date filtering or merges left it empty. "
                 "Cannot compute decile portfolios with zero rows."
             )
-
-        print(
-            f"Calculating portfolio from {pd.Timestamp(dates[0]).date() if len(dates) else 'N/A'}, "
-            f"{pd.Timestamp(dates[1]).date() if len(dates) > 1 else 'N/A'} "
-            f"to {pd.Timestamp(dates[-1]).date() if len(dates) else 'N/A'}"
-        )
 
         turnover = np.zeros(len(dates) - 1)
         portfolio_ret = pd.DataFrame(index=dates, columns=list(range(cut)))
@@ -267,45 +339,12 @@ class PortfolioManager:
 
             sell_decile[["weight", "inv_ret"]] = sell_decile[["weight", "inv_ret"]] * (-1)
             to_df = pd.concat([sell_decile, buy_decile]) if not buy_decile.empty else sell_decile
-            
-            # # Debug to_df and identify duplicated indices
-            # if not to_df.empty:
-            #     duplicated_indices = to_df.index[to_df.index.duplicated()].unique()
-            #     print(f"[DEBUG] to_df at date {d}, shape: {to_df.shape}")
-            #     print(f"[DEBUG] to_df columns: {to_df.columns}")
-            #     if len(duplicated_indices) > 0:
-            #         print(f"[DEBUG] DUPLICATED INDICES in to_df: {len(duplicated_indices)} unique values")
-            #         print(f"[DEBUG] First 10 duplicated indices: {duplicated_indices[:10]}")
-            #         for idx in duplicated_indices[:5]:  # Show first 5 duplicates in detail
-            #             print(f"[DEBUG] Rows for duplicated index '{idx}':\n{to_df.loc[idx]}")
-            #     else:
-            #         print(f"[DEBUG] No duplicated indices in to_df")
 
-            # # Debug prev_to_df and identify duplicated indices
-            # if i > 0 and prev_to_df is not None and not prev_to_df.empty:
-            #     duplicated_indices = prev_to_df.index[prev_to_df.index.duplicated()].unique()
-            #     print(f"[DEBUG] prev_to_df at previous date, shape: {prev_to_df.shape}")
-            #     print(f"[DEBUG] prev_to_df columns: {prev_to_df.columns}")
-            #     if len(duplicated_indices) > 0:
-            #         print(f"[DEBUG] DUPLICATED INDICES in prev_to_df: {len(duplicated_indices)} unique values")
-            #         print(f"[DEBUG] First 10 duplicated indices: {duplicated_indices[:10]}")
-            #         for idx in duplicated_indices[:5]:  # Show first 5 duplicates in detail
-            #             print(f"[DEBUG] Rows for duplicated index '{idx}':\n{prev_to_df.loc[idx]}")
-            #     else:
-            #         print(f"[DEBUG] No duplicated indices in prev_to_df")
-
-            # print("---------------------------------------")
-            # breakpoint()
-            
-            # ---- FIX FOR DUPLICATES / REINDEX ERROR ----
-            # If duplicates exist in to_df or prev_to_df (same index label repeated),
-            # pandas reindex can choke. Summation or dedup is often correct for turnover.
             if not to_df.empty:
                 to_df = to_df.groupby(to_df.index).sum()
             if i > 0 and prev_to_df is not None and not prev_to_df.empty:
                 prev_to_df = prev_to_df.groupby(prev_to_df.index).sum()
-            # ------------------------------------------
-            
+
             if i > 0 and prev_to_df is not None:
                 all_idx = np.unique(list(to_df.index) + list(prev_to_df.index))
                 tto_df = pd.DataFrame(index=all_idx)
@@ -318,19 +357,21 @@ class PortfolioManager:
                 turnover[i - 1] *= 0.5
             prev_to_df = to_df
 
+            # if i > 0 and self.transaction_cost:
+            #     threshold = np.percentile(rebalance_df["MarketCap"], 80)
+            #     cost_rates = np.where(rebalance_df["MarketCap"] >= threshold, 0.001, 0.002)
+            #     if weight_type == "ew":
+            #         avg_cost_rate_overall = np.mean(cost_rates)
+            #     else:
+            #         weights = rebalance_df["MarketCap"] / rebalance_df["MarketCap"].sum()
+            #         avg_cost_rate_overall = np.sum(weights * cost_rates)
+            #     portfolio_ret.loc[d] = portfolio_ret.loc[d] - avg_cost_rate_overall * turnover[i - 1]
+
         portfolio_ret = portfolio_ret.fillna(0.0)
         portfolio_ret["H-L"] = portfolio_ret[cut - 1] - portfolio_ret[0]
 
-        print(f"[DEBUG] Spearman Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_corr):.4f}")
-        print(f"[DEBUG] Pearson Corr (Prob vs. StockReturn) = {np.nanmean(prob_ret_pearson_corr):.4f}")
-        print(
-            f"[DEBUG] Spearman Corr (Prob vs. 'inv_ret' in top/bottom decile) = {np.nanmean(prob_inv_ret_corr):.4f}"
-        )
-        print(
-            f"[DEBUG] Pearson Corr (Prob vs. 'inv_ret' in top/bottom decile) = {np.nanmean(prob_inv_ret_pearson_corr):.4f}"
-        )
-
-        return portfolio_ret, np.mean(turnover)
+        avg_turnover = np.mean(turnover)
+        return portfolio_ret, avg_turnover
 
     @staticmethod
     def _ret_to_cum_log_ret(rets: pd.Series) -> pd.Series:
@@ -345,22 +386,12 @@ class PortfolioManager:
         save_path: str,
         plot_title: str
     ) -> None:
-        """
-        Generate a plot of cumulative returns. In this version, the columns are renamed so that
-        the decile 0 portfolio is labeled "Low(L)", decile 9 is labeled "High(H)", and the H-L (difference)
-        is labeled "H-L". Then, each line is plotted with a custom colour:
-            - "Low(L)" (decile 0) in red,
-            - "High(H)" (decile 9) in green,
-            - "H-L" in blue,
-            - and any other (here, "SPY") in gray.
-        """
         ret_name = "nxt_freq_ewret" if weight_type == "ew" else "nxt_freq_vwret"
         df = portfolio_ret.copy()
         df.columns = ["Low(L)"] + [str(i) for i in range(2, cut)] + ["High(H)", "H-L"]
 
         spy = eqd.get_spy_freq_rets(self.freq)
         if ret_name not in spy.columns:
-            print(f"[DEBUG] Could not find {ret_name} in SPY columns => using placeholder 'SPY' naming only.")
             df["SPY"] = spy[spy.columns[-1]]
         else:
             df["SPY"] = spy[ret_name]
@@ -428,7 +459,6 @@ class PortfolioManager:
         turnover_annualized = turnover / freq_factor
         summary_df.loc["Turnover", :] = [np.nan, np.nan, turnover_annualized]
 
-        print(summary_df)
         return summary_df
 
     def generate_portfolio(self, cut: int = 10, delay: int = 0) -> None:
@@ -469,8 +499,7 @@ class PortfolioManager:
             plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
             print(f"[INFO] Generating cumulative returns plots for portfolio '{pf_name}'...")
             ppp.plot_all_years_cumulative_returns(portfolio_ret, plots_dir, weight_type)
-            print(f"[INFO] Cumulative returns yearly plots saved in {plots_dir}")
-            
+
             combined_plot_path = os.path.join(plots_dir, f"combined_cumulative_returns_{pf_name}.png")
             collapse_periods = [
                 (pd.Timestamp("2007-10-01"), pd.Timestamp("2009-03-01"), "GFC"),
@@ -482,13 +511,10 @@ class PortfolioManager:
                 collapse_periods,
                 title=f"Combined Cumulative Returns ({weight_type.upper()})"
             )
-            print(f"[INFO] Combined cumulative returns plot with shaded collapse periods saved at {combined_plot_path}")
             
-            print(f"[INFO] Assessing annual performance for portfolio '{pf_name}'...")
             annual_perf = ppp.assess_yearly_performance(portfolio_ret)
             annual_perf_path = os.path.join(self.portfolio_dir, f"{pf_name}_annual_performance.csv")
             annual_perf.to_csv(annual_perf_path)
-            print(f"[INFO] Annual performance metrics saved to {annual_perf_path}")
 
     def get_portfolio_name(self, weight_type: str, delay: int, cut: int) -> str:
         assert weight_type.lower() in ["ew", "vw"]
@@ -518,7 +544,6 @@ class PortfolioManager:
         return df
 
 def main():
-    """Example usage (not typically used this way)."""
     pass
 
 if __name__ == "__main__":

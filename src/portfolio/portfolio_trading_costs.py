@@ -48,8 +48,12 @@ class PortfolioManager:
             if "up_prob" not in signal_df.columns:
                 raise ValueError("signal_df must have an 'up_prob' column if load_signal=True.")
             self.signal_df = self.get_up_prob_with_period_ret(signal_df)
+            print(f"[DEBUG] signal_df has {len(self.signal_df)} samples after merging with period returns.")
+            breakpoint()
         else:
             self.signal_df = None
+            print(f"[DEBUG] signal_df is not loaded. No data available for portfolio generation.")
+            breakpoint()
 
     def __add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         period_ret = eqd.get_period_ret(self.freq, country=self.country)
@@ -65,11 +69,19 @@ class PortfolioManager:
             columns.append(self.custom_ret)
 
         print(f"[DEBUG] Merging signal_df with period_ret columns: {columns}")
-        print(f"[DEBUG] signal_df has {len(signal_df)} samples, period_ret has {len(period_ret)} samples.")
-        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
-        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
+        print(f"[DEBUG] signal_df has {len(signal_df)} samples before merging.")
         print(f"[DEBUG] signal_df index: {signal_df.index.names}")
+        print(f"[DEBUG] signal_df columns: {signal_df.columns}")
+        print(f"[DEBUG] signal_df.head():\n{signal_df.head()}")
+        
+        print(f"[DEBUG] --------------------------------------")
+        
+        
+        print(f"[DEBUG] period_ret has {len(period_ret)} samples.")
         print(f"[DEBUG] period_ret index: {period_ret.index.names}")
+        print(f"[DEBUG] period_ret columns: {period_ret.columns}")
+        print(f"[DEBUG] period_ret.head():\n{period_ret.head()}")
+        
         
         period_ret = period_ret.rename(columns={"MarketCap": "MC_from_ret"})
 
@@ -77,6 +89,9 @@ class PortfolioManager:
 
         # For convenience, define a base 'no_delay_ret_name'
         merged_df[self.no_delay_ret_name] = merged_df[f"next_{self.freq}_ret_0delay"]
+        
+        print(f"[DEBUG] Merged DataFrame shape: {merged_df.shape}")
+        print(f"[DEBUG] Merged DataFrame merged_df.head():\n{merged_df.head()}")
         
         # Finally, drop rows that are still missing any of these columns
         merged_df.dropna(subset=columns, inplace=True)
