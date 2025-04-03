@@ -1,4 +1,3 @@
-# src/portfolio/portfolio.py
 import os
 import os.path as op
 import math
@@ -22,10 +21,6 @@ class PortfolioManager:
 
     We also now filter to the top 50% by MarketCap (for each Date) before doing any splits.
     This is done in the _get_up_prob_with_period_ret method.
-
-    Example usage:
-        pm = PortfolioManager(signal_df=..., freq='week', portfolio_dir='...', tail_percent_list=[0.01, 0.05])
-        pm.generate_portfolio()
     """
 
     def __init__(
@@ -42,9 +37,11 @@ class PortfolioManager:
         transaction_cost: bool = False,
         tail_percent_list: list = [0.01, 0.05, 0.10]
     ) -> None:
+
         assert freq in ["week", "month", "quarter"], (
             f"freq must be one of 'week','month','quarter'; got {freq}"
         )
+
         self.freq = freq
         self.portfolio_dir = portfolio_dir
         self.start_year = start_year
@@ -132,12 +129,8 @@ class PortfolioManager:
 
         # Now filter to top 50% by MarketCap for each Date
         # We do this cross-sectionally, meaning for each date, we only keep the top half (descending MarketCap)
-        # Steps:
-        #   1) reset the index
-        #   2) groupby("Date"), sort by MarketCap descending
-        #   3) keep the top half
-        #   4) re-set index
         df_reset = merged_df.reset_index()
+
         def keep_top_half(group):
             group = group.sort_values("MarketCap", ascending=False)
             half_n = len(group) // 2  # integer division
@@ -163,6 +156,7 @@ class PortfolioManager:
         """
         For a single tail_percent and single delay, compute daily returns for:
             - Low_{tp}, High_{tp}, H-L_{tp}.
+        Optionally subtract transaction costs if self.transaction_cost=True.
         Returns a DataFrame with those 3 columns over time, plus the average turnover.
         """
         if self.custom_ret:
@@ -212,46 +206,76 @@ class PortfolioManager:
                 continue
 
             bottom_df = pick_bottom_tail(daily_df, low_q)
-            top_df = pick_top_tail(daily_df, high_q)
+            top_df    = pick_top_tail(daily_df, high_q)
 
             bottom_ret = compute_weighted_returns(bottom_df)
-            top_ret = compute_weighted_returns(top_df)
-            low_col.append(bottom_ret)
-            high_col.append(top_ret)
+            top_ret    = compute_weighted_returns(top_df)
 
-            # turnover logic
+            #----------------------#
+            #   Turnover Logic     #
+            #----------------------#
             combined_now = pd.concat([bottom_df, top_df])
             if weight_type == "ew":
                 if not bottom_df.empty:
                     bottom_df["weight"] = 1.0 / len(bottom_df)
                 if not top_df.empty:
-                    top_df["weight"] = 1.0 / len(top_df)
+                    top_df["weight"]    = 1.0 / len(top_df)
             else:
                 if not top_df.empty:
-                    top_df["weight"] = top_df["MarketCap"] / top_df["MarketCap"].sum()
+                    top_df["weight"]    = top_df["MarketCap"] / top_df["MarketCap"].sum()
                 if not bottom_df.empty:
                     bottom_df["weight"] = bottom_df["MarketCap"] / bottom_df["MarketCap"].sum()
+
             combined_now = pd.concat([bottom_df, top_df])
-            combined_now = combined_now.groupby(combined_now.index).sum()  # unify duplicates
+            combined_now = combined_now.groupby(combined_now.index).sum()
+
             if i > 0 and prev_to_df is not None:
                 all_idx = np.unique(list(combined_now.index) + list(prev_to_df.index))
                 tto_df = pd.DataFrame(index=all_idx)
-                tto_df["cur_weight"] = combined_now["weight"]
-                tto_df[["prev_weight", "ret", "inv_ret"]] = prev_to_df[["weight", ret_name, "inv_ret"]]
+                tto_df["cur_weight"]  = combined_now["weight"]
+                tto_df[["prev_weight", "ret", "inv_ret"]] = \
+                    prev_to_df[["weight", ret_name, "inv_ret"]]
                 tto_df.fillna(0, inplace=True)
 
                 denom = 1.0 + tto_df["inv_ret"].sum()
-                this_turnover = (tto_df["cur_weight"] - tto_df["prev_weight"]*(1 + tto_df["ret"])/denom).abs().sum()
+                this_turnover = (
+                    tto_df["cur_weight"]
+                    - tto_df["prev_weight"] * (1 + tto_df["ret"]) / denom
+                ).abs().sum()
+                # We'll store half of that turnover for the long side, half for the short side
                 turnover[i - 1] = 0.5 * this_turnover
 
             combined_now["inv_ret"] = combined_now["weight"] * combined_now[ret_name]
             prev_to_df = combined_now
 
+            #-------------------------------#
+            #   Subtract Transaction Cost   #
+            #-------------------------------#
+            daily_tc = 0.0
+            if True and i > 0:
+                daily_tc = turnover[i - 1] * 0.001  # 10 bps = 0.001
+                print(f"[INFO] Daily transaction cost: {daily_tc:.4f}")
+                # breakpoint()
+
+                # We'll split the cost half-and-half between bottom & top:
+                half_cost = 0.5 * daily_tc
+                bottom_ret -= half_cost
+                top_ret    -= half_cost
+
+            low_col.append(bottom_ret)
+            high_col.append(top_ret)
+
+        # Build the daily return DataFrame
         daily_ret_df = pd.DataFrame({
-            f"Low_{int(tail_percent*100)}%": low_col,
+            f"Low_{int(tail_percent*100)}%":  low_col,
             f"High_{int(tail_percent*100)}%": high_col
         }, index=dates)
-        daily_ret_df[f"H-L_{int(tail_percent*100)}%"] = daily_ret_df[f"High_{int(tail_percent*100)}%"] - daily_ret_df[f"Low_{int(tail_percent*100)}%"]
+
+        daily_ret_df[f"H-L_{int(tail_percent*100)}%"] = (
+            daily_ret_df[f"High_{int(tail_percent*100)}%"]
+            - daily_ret_df[f"Low_{int(tail_percent*100)}%"]
+        )
+
         avg_turn = np.mean(turnover)
         return daily_ret_df, avg_turn
 
@@ -285,7 +309,7 @@ class PortfolioManager:
 
     @staticmethod
     def _ret_to_cum_log_ret(series: pd.Series) -> pd.Series:
-        """ Convert daily returns into cumulative log-returns """
+        """ Convert daily (or weekly, monthly, etc.) returns into cumulative log-returns """
         return np.log1p(series).cumsum()
 
     def make_portfolio_plot(self, portfolio_ret: pd.DataFrame, weight_type: str, plot_title: str, save_path: str) -> None:
@@ -293,6 +317,7 @@ class PortfolioManager:
         Plot cumulative log-returns for each column in portfolio_ret.
         """
         cr_df = portfolio_ret.copy()
+        
         for col in cr_df.columns:
             cr_df[col] = self._ret_to_cum_log_ret(cr_df[col])
 
@@ -322,8 +347,10 @@ class PortfolioManager:
             period = 52
         elif self.freq == "month":
             period = 12
-        else:
+        elif self.freq == "quarter":
             period = 4
+        else:
+            period = 252  # fallback for daily
 
         avg = portfolio_ret.mean(axis=0) * period
         std = portfolio_ret.std(axis=0) * math.sqrt(period)
@@ -335,6 +362,45 @@ class PortfolioManager:
             "SR": sr
         })
         return df_summary.round(3)
+
+    def annual_sharpe_ratio(self, pf_ret: pd.DataFrame, weight_type: str) -> pd.DataFrame:
+        """
+        Compute Sharpe ratio by calendar year for each strategy column.
+        Uses the self.freq attribute to determine annualization.
+        """
+        if self.freq == "week":
+            periods = 52
+        elif self.freq == "month":
+            periods = 12
+        elif self.freq == "quarter":
+            periods = 4
+        else:
+            periods = 252  # fallback for daily
+
+        df_cp = pf_ret.copy()
+        df_cp["Year"] = df_cp.index.year
+
+        def per_year_sharpe(g: pd.DataFrame) -> pd.Series:
+            # drop the 'Year' column so we only have the strategy returns
+            g = g.drop(columns=["Year"], errors="ignore")
+
+            avg_annual = g.mean() * periods
+            std_annual = g.std() * np.sqrt(periods)
+            sharpe_annual = avg_annual / std_annual.replace(0, np.nan)
+            return sharpe_annual
+
+        sr_by_year = df_cp.groupby("Year").apply(per_year_sharpe)
+        
+        # Save the annualized Sharpe ratios to a CSV file
+        sr_by_year = sr_by_year.reset_index()
+        sr_by_year.columns = ["Year"] + list(sr_by_year.columns[1:])
+        sr_by_year = sr_by_year.set_index("Year")
+        sr_by_year = sr_by_year.round(3)
+        sr_by_year_path = os.path.join(self.portfolio_dir, f"annual_sharpe_ratios_{weight_type}.csv")
+        sr_by_year.to_csv(sr_by_year_path)
+        print(f"[INFO] Annualized Sharpe ratios saved to {sr_by_year_path}")
+        
+        return sr_by_year
 
     def generate_portfolio(self, delay: int = 0, cut=None) -> None:
         """
@@ -382,6 +448,11 @@ class PortfolioManager:
                 save_path=combined_plot_path
             )
             print(f"[INFO] Combined cumulative returns plot saved at {combined_plot_path}")
+            
+            self.annual_sharpe_ratio(
+                pf_ret=portfolio_ret,
+                weight_type=weight_type
+            )
 
     def _get_portfolio_name(self, weight_type: str, delay: int) -> str:
         """
