@@ -46,15 +46,17 @@ EMP_CNN1d_BL_SETTING = {
     60: ([3, 3, 3], [1, 1, 1], [1, 1, 1], [2, 2, 2]),
 }
 
-IS_YEARS = list(range(1993, 2001))
+# IS_YEARS = list(range(1993, 2001))
+
+IS_YEARS = list(range(2003, 2011))
 
 # For splitting sample by year
 # IS_YEARS = list(range(1993, 2001))
-OOS_YEARS = list(range(2001, 2025))
+OOS_YEARS = list(range(2012, 2025))
 
 # Benchmark model naming (for referencing in experiment code)
 BENCHMARK_MODEL_NAME_DICT = {
-    5: "D5L2F53S1F53S1C64MP11",
+    5: "D5L2F53S1F53S1C64MP11XXX",
     20: "D20L3F53S1F53S1F53S1C64MP111",
     60: "D60L4F53S1F53S1F53S1F53S1C64MP1111",
 }
