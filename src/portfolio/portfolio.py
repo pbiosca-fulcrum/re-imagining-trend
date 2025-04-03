@@ -132,67 +132,17 @@ class PortfolioManager:
             yearly_market_caps = {}
             for year in range(self.start_year, self.end_year + 1):
                 year_df = df_reset[df_reset['Year'] == year]
-            if not year_df.empty:
-                # Get the last observation for each StockID in this year
-                last_obs = year_df.sort_values('Date').groupby('StockID').last()
-                yearly_market_caps[year] = last_obs['MarketCap']
+                if not year_df.empty:
+                    # Get the last observation for each StockID in this year
+                    last_obs = year_df.sort_values('Date').groupby('StockID').last()
+                    yearly_market_caps[year] = last_obs['MarketCap']
             
-            # Create overall plot with subplots for each year
-            num_years = self.end_year - self.start_year + 1
-            cols = min(3, num_years)
-            rows = (num_years + cols - 1) // cols
-            
-            fig, axes = plt.subplots(rows, cols, figsize=(15, rows * 4))
-            if rows == 1 and cols == 1:
-                axes = np.array([[axes]])
-            elif rows == 1 or cols == 1:
-                axes = axes.reshape(-1, 1) if cols == 1 else axes.reshape(1, -1)
-            
-            year_idx = 0
-            for year, market_caps in sorted(yearly_market_caps.items()):
-                row, col = divmod(year_idx, cols)
-                ax = axes[row, col]
-            
-            # Use log scale for MarketCap
-            log_market_cap = np.log10(market_caps)
-            ax.hist(log_market_cap, bins=40, alpha=0.7, color='steelblue', edgecolor='black')
-            ax.set_xlabel('Market Cap (log10 scale)')
-            ax.set_ylabel('Frequency')
-            ax.set_title(f'Market Cap Distribution - {year}')
-            
-            # Add vertical lines for common market cap thresholds
+            # Also create a single plot with all years for comparison (unique plot)
+            plt.figure(figsize=(12, 8))
             thresholds = [1e6, 1e7, 1e8, 1e9, 1e10]
             labels = ['$1M', '$10M', '$100M', '$1B', '$10B']
-            for threshold, label in zip(thresholds, labels):
-                ax.axvline(np.log10(threshold), color='red', linestyle='--', alpha=0.7)
-                ax.text(np.log10(threshold), ax.get_ylim()[1]*0.9, label, 
-                   rotation=90, verticalalignment='top', fontsize=8)
-            
-            # Add summary statistics as text
-            stats = (f"N: {len(market_caps)}\n"
-                   f"Mean: ${market_caps.mean()/1e9:.2f}B\n"
-                   f"Median: ${market_caps.median()/1e9:.2f}B\n"
-                   f"Min: ${market_caps.min()/1e6:.2f}M\n"
-                   f"Max: ${market_caps.max()/1e9:.2f}B")
-            ax.text(0.02, 0.95, stats, transform=ax.transAxes, 
-                  bbox=dict(facecolor='white', alpha=0.8), fontsize=8)
-            
-            year_idx += 1
-            
-            # Hide any unused subplots
-            for i in range(year_idx, rows * cols):
-                row, col = divmod(i, cols)
-                axes[row, col].axis('off')
-            
-            plt.tight_layout()
-            os.makedirs(op.join(self.portfolio_dir, 'analysis'), exist_ok=True)
-            plt.savefig(op.join(self.portfolio_dir, 'analysis', f'market_cap_by_year_{self.country}.png'))
-            plt.close()
-            
-            # Also create a single plot with all years for comparison
-            plt.figure(figsize=(12, 8))
             for year, market_caps in sorted(yearly_market_caps.items()):
-            # Plot each year as a line showing the distribution
+                # Plot each year as a line showing the distribution using KDE
                 sns_data = pd.DataFrame({'MarketCap': np.log10(market_caps), 'Year': str(year)})
                 sns.kdeplot(data=sns_data, x='MarketCap', label=f'{year} (n={len(market_caps)})')
             
@@ -208,6 +158,7 @@ class PortfolioManager:
             
             plt.legend()
             plt.tight_layout()
+            os.makedirs(op.join(self.portfolio_dir, 'analysis'), exist_ok=True)
             plt.savefig(op.join(self.portfolio_dir, 'analysis', f'market_cap_yearly_comparison_{self.country}.png'))
             plt.close()
 
@@ -216,16 +167,16 @@ class PortfolioManager:
         print(f"[DEBUG] Final DataFrame columns: {final_df.head(20)}")
         
         # # Filter for top 20% largest companies by MarketCap for each year
-        # final_df = final_df.reset_index()
-        # final_df['Year'] = pd.DatetimeIndex(final_df['Date']).year
+        final_df = final_df.reset_index()
+        final_df['Year'] = pd.DatetimeIndex(final_df['Date']).year
         
-        # # Group by year and keep only top 20% by market cap
-        # def top_quintile(group):
-        #     threshold = group['MarketCap'].quantile(0.5)  # 80th percentile (top 20%)
-        #     return group[group['MarketCap'] < threshold]
+        # Group by year and keep only top 20% by market cap
+        def top_quintile(group):
+            threshold = group['MarketCap'].quantile(0.5)  # 80th percentile (top 20%)
+            return group[group['MarketCap'] < threshold]
         
-        # final_df = final_df.groupby('Year').apply(top_quintile).reset_index(drop=True)
-        # final_df = final_df.set_index(['Date', 'StockID'])
+        final_df = final_df.groupby('Year').apply(top_quintile).reset_index(drop=True)
+        final_df = final_df.set_index(['Date', 'StockID'])
         
         # print(f"[DEBUG] Filtered DataFrame columns: {final_df.head(20)}")
         # breakpoint()
