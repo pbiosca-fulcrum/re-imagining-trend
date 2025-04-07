@@ -21,6 +21,10 @@ class PortfolioManager:
 
     We also now filter to the top 50% by MarketCap (for each Date) before doing any splits.
     This is done in the _get_up_prob_with_period_ret method.
+
+    EXTRA minimal update:
+      We now create 'DollarVolume' = 'Close' × 'Vol' from daily data,
+      and only keep rows where DollarVolume >= 1M.
     """
 
     def __init__(
@@ -62,73 +66,6 @@ class PortfolioManager:
             self.signal_df = self._get_up_prob_with_period_ret(signal_df)
         else:
             self.signal_df = None
-            
-    import pandas as pd
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    def plot_weekly_confidence_tails(self, signal_df: pd.DataFrame, save_path: str) -> None:
-        """
-        For each week in signal_df (indexed by ['Date','StockID'] or a Date column),
-        compute the average 'up_prob' for the top 10% and the bottom 10% of stocks.
-        Plots both time series in a single chart.
-        """
-
-        # Make sure the DataFrame has a Date in the index (or as a column)
-        # If needed, reset index to ensure we have a Date column to group by:
-        if not isinstance(signal_df.index, pd.MultiIndex) or 'Date' not in signal_df.index.names:
-            if 'Date' in signal_df.columns:
-                signal_df = signal_df.set_index('Date')
-            else:
-                raise ValueError("signal_df must have 'Date' in the index or a 'Date' column.")
-
-        # Convert index to weekly frequency (if dates are daily, this resamples them to weeks):
-        # If your data is already weekly (one row per week per stock), you can skip this step.
-        # Otherwise, uncomment and adjust to your needs.
-        # signal_df = signal_df.resample('W', level='Date').ffill()
-        # signal_df = signal_df.dropna(subset=['up_prob'])
-
-        # Group by each date (weekly) and slice top/bottom 10% of 'up_prob'
-        results = []
-        for date, group in signal_df.groupby(level='Date'):
-            up_probs = group['up_prob'].dropna()
-            if up_probs.empty:
-                continue
-
-            # Sort ascending and pick bottom 10% (lowest up_prob) and top 10% (highest up_prob)
-            up_probs_sorted = up_probs.sort_values()
-            n = len(up_probs_sorted)
-            if n < 10:
-                # If there aren't enough stocks, skip this date
-                continue
-
-            cutoff = int(0.01 * n)
-            bottom_mean = up_probs_sorted.iloc[:cutoff].mean()
-            top_mean = up_probs_sorted.iloc[-cutoff:].mean()
-
-            results.append({
-                'Date': date,
-                'Bottom10_mean': bottom_mean,
-                'Top10_mean': top_mean
-            })
-            
-            print(f"Date: {date}, Bottom 10% Mean: {bottom_mean:.4f}, Top 10% Mean: {top_mean:.4f}")
-
-        # Create a DataFrame of the results
-        tail_df = pd.DataFrame(results).set_index('Date').sort_index()
-
-        # Plot
-        plt.figure(figsize=(10, 6))
-        plt.plot(tail_df.index, tail_df['Bottom10_mean'], label='Bottom 10% Avg Confidence')
-        plt.plot(tail_df.index, tail_df['Top10_mean'], label='Top 10% Avg Confidence')
-        plt.xlabel('Date')
-        plt.ylabel('Average "up_prob"')
-        plt.title('Weekly Bottom 10% vs Top 10% Average Confidence')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"{save_path}/weekly_confidence_tails.png")
-        plt.close()
-        print("Plot saved as 'weekly_confidence_tails.png'")
 
     def _add_period_ret_to_us_res_df_w_delays(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -185,25 +122,33 @@ class PortfolioManager:
     def _get_up_prob_with_period_ret(self, signal_df: pd.DataFrame) -> pd.DataFrame:
         """
         Merge up_prob with next_{freq}_ret_Xdelay columns, then filter to the top 50% by MarketCap (each Date).
+        Also filter out any stock whose DollarVolume < 1,000,000, from daily 'Close'×'Vol' data.
         """
         merged_df = self._add_period_ret_to_us_res_df_w_delays(signal_df)
+
+        # [NEW STEP to get DollarVolume]
+        # We'll load the full daily data, then join 'Close' & 'Vol' to get 'DollarVolume'.
+        daily_data = eqd.processed_us_data()[["Close", "Vol"]]  # has multi-index [Date, StockID]
+        daily_data = daily_data.rename(columns={"Close": "DailyClose", "Vol": "DailyVol"})
+
+        merged_df = merged_df.join(daily_data, how="left")  # join on [Date, StockID]
+        merged_df["DollarVolume"] = merged_df["DailyClose"] * merged_df["DailyVol"]
+        # end [NEW STEP]
 
         # basic checks
         merged_df["MarketCap"] = merged_df["MarketCap"].abs()
         merged_df = merged_df[~merged_df["MarketCap"].isnull() & (merged_df["MarketCap"] > 0)]
 
+        # Now drop if DollarVolume < 1,000,000
+        merged_df = merged_df[~merged_df["DollarVolume"].isnull() & (merged_df["DollarVolume"] >= 1_000_000)]
+
         # Now filter to top 50% by MarketCap for each Date
-        # We do this cross-sectionally, meaning for each date, we only keep the top half (descending MarketCap)
         df_reset = merged_df.reset_index()
 
         def keep_top_half(group):
             group = group.sort_values("MarketCap", ascending=False)
             half_n = int(len(group) * (9/16))
-            park = group.iloc[:half_n]
-            print(f"Date: {park['Date'].iloc[0]}, Min MarketCap: {park['MarketCap'].min():.2f}, Max MarketCap: {park['MarketCap'].max():.2f}")
-            return park
-        
-        # breakpoint()
+            return group.iloc[:half_n]
 
         filtered = (
             df_reset.groupby("Date", group_keys=False)
@@ -223,9 +168,7 @@ class PortfolioManager:
         """
         For a single tail_percent and single delay, compute daily returns for:
             - Low_{tp}, High_{tp},
-            - H-L_{tp} (with transaction cost applied only once to the difference if self.transaction_cost=True).
-
-        Returns a DataFrame with those 3 columns over time, plus the average turnover.
+            - H-L_{tp} (with transaction cost applied if self.transaction_cost=True).
         """
         if self.custom_ret:
             ret_name = self.custom_ret
@@ -235,9 +178,7 @@ class PortfolioManager:
             )
 
         dates = np.sort(df.index.get_level_values("Date").unique())
-        low_col = []
-        high_col = []
-        ls_col = []
+        low_col, high_col, ls_col = [], [], []
         turnover = np.zeros(len(dates) - 1)
         prev_to_df = None
 
@@ -281,9 +222,6 @@ class PortfolioManager:
             bottom_ret = compute_weighted_returns(bottom_df)
             top_ret    = compute_weighted_returns(top_df)
 
-            #----------------------#
-            #   Turnover Logic     #
-            #----------------------#
             combined_now = pd.concat([bottom_df, top_df])
             if weight_type == "ew":
                 if not bottom_df.empty:
@@ -296,8 +234,7 @@ class PortfolioManager:
                 if not bottom_df.empty:
                     bottom_df["weight"] = bottom_df["MarketCap"] / bottom_df["MarketCap"].sum()
 
-            combined_now = pd.concat([bottom_df, top_df])
-            combined_now = combined_now.groupby(combined_now.index).sum()
+            combined_now = pd.concat([bottom_df, top_df]).groupby(level=["StockID"]).sum()
 
             if i > 0 and prev_to_df is not None:
                 all_idx = np.unique(list(combined_now.index) + list(prev_to_df.index))
@@ -307,38 +244,26 @@ class PortfolioManager:
                     prev_to_df[["weight", ret_name, "inv_ret"]]
                 tto_df.fillna(0, inplace=True)
 
-                # The "denom" is to scale the previous day's weights after the day's return
                 denom = 1.0 + tto_df["inv_ret"].sum()
                 this_turnover = (
                     tto_df["cur_weight"]
                     - tto_df["prev_weight"] * (1 + tto_df["ret"]) / denom
                 ).abs().sum()
-                # Store half for the long side, half for the short side, if needed
-                # But for the cost, we interpret 'this_turnover' as total for the L–S
                 turnover[i - 1] = this_turnover
 
             combined_now["inv_ret"] = combined_now["weight"] * combined_now[ret_name]
             prev_to_df = combined_now
 
-            #-------------------------------#
-            #   L–S Return + Transaction   #
-            #-------------------------------#
-            # If no transaction_cost, daily cost is 0, else it's turnover[i-1] * 0.10%.
             if i == 0:
-                # No cost on the very first step
                 daily_ls_cost = 0.0
             else:
-                daily_ls_cost = turnover[i - 1] * 0.001 if True else 0.0
+                daily_ls_cost = turnover[i - 1] * 0.001 if self.transaction_cost else 0.0
 
-            # The raw L–S return is top_ret - bottom_ret
-            # Then we subtract the total cost only once from that difference.
             ls_ret = (top_ret - bottom_ret) - daily_ls_cost
-            
-            low_col.append(bottom_ret)  # raw bottom
-            high_col.append(top_ret)    # raw top
-            ls_col.append(ls_ret)       # net L–S (with cost subtracted if applicable)
+            low_col.append(bottom_ret)
+            high_col.append(top_ret)
+            ls_col.append(ls_ret)
 
-        # Build the daily return DataFrame
         low_name  = f"Low_{int(tail_percent*100)}%"
         high_name = f"High_{int(tail_percent*100)}%"
         ls_name   = f"H-L_{int(tail_percent*100)}%"
@@ -356,16 +281,8 @@ class PortfolioManager:
         weight_type: str,
         delay: int = 0
     ) -> (pd.DataFrame, dict):
-        """
-        For each specified tail_percent, create 3 columns in the final DataFrame:
-          Low_{p}, High_{p}, H-L_{p}.
-        Also track turnover in a dict { tail_percent: avg_turnover }.
-        """
         if self.signal_df is None or self.signal_df.empty:
             raise ValueError("signal_df is empty or None. No data available.")
-        
-        plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
-        self.plot_weekly_confidence_tails(self.signal_df, save_path=plots_dir)
 
         df = self.signal_df.copy()
         dates = np.sort(df.index.get_level_values("Date").unique())
@@ -388,9 +305,6 @@ class PortfolioManager:
         return np.log1p(series).cumsum()
 
     def make_portfolio_plot(self, portfolio_ret: pd.DataFrame, weight_type: str, plot_title: str, save_path: str) -> None:
-        """
-        Plot cumulative log-returns for each column in portfolio_ret.
-        """
         cr_df = portfolio_ret.copy()
         for col in cr_df.columns:
             cr_df[col] = self._ret_to_cum_log_ret(cr_df[col])
@@ -414,9 +328,6 @@ class PortfolioManager:
         plt.close()
 
     def portfolio_res_summary(self, portfolio_ret: pd.DataFrame) -> pd.DataFrame:
-        """
-        For each column in `portfolio_ret`, compute annualized return, annualized std, and Sharpe ratio.
-        """
         if self.freq == "week":
             period = 52
         elif self.freq == "month":
@@ -424,7 +335,7 @@ class PortfolioManager:
         elif self.freq == "quarter":
             period = 4
         else:
-            period = 252  # fallback for daily
+            period = 252
 
         avg = portfolio_ret.mean(axis=0) * period
         std = portfolio_ret.std(axis=0) * math.sqrt(period)
@@ -438,10 +349,6 @@ class PortfolioManager:
         return df_summary.round(3)
 
     def annual_sharpe_ratio(self, pf_ret: pd.DataFrame, weight_type: str) -> pd.DataFrame:
-        """
-        Compute Sharpe ratio by calendar year for each strategy column.
-        Uses the self.freq attribute to determine annualization.
-        """
         if self.freq == "week":
             periods = 52
         elif self.freq == "month":
@@ -449,23 +356,19 @@ class PortfolioManager:
         elif self.freq == "quarter":
             periods = 4
         else:
-            periods = 252  # fallback for daily
+            periods = 252
 
         df_cp = pf_ret.copy()
         df_cp["Year"] = df_cp.index.year
 
         def per_year_sharpe(g: pd.DataFrame) -> pd.Series:
-            # drop the 'Year' column so we only have the strategy returns
             g = g.drop(columns=["Year"], errors="ignore")
-
             avg_annual = g.mean() * periods
             std_annual = g.std() * np.sqrt(periods)
-            sharpe_annual = avg_annual / std_annual.replace(0, np.nan)
-            return sharpe_annual
+            return avg_annual / std_annual.replace(0, np.nan)
 
         sr_by_year = df_cp.groupby("Year").apply(per_year_sharpe)
 
-        # Save the annualized Sharpe ratios to a CSV file
         sr_by_year = sr_by_year.reset_index()
         sr_by_year.columns = ["Year"] + list(sr_by_year.columns[1:])
         sr_by_year = sr_by_year.set_index("Year")
@@ -473,18 +376,9 @@ class PortfolioManager:
         sr_by_year_path = os.path.join(self.portfolio_dir, f"annual_sharpe_ratios_{weight_type}.csv")
         sr_by_year.to_csv(sr_by_year_path)
         print(f"[INFO] Annualized Sharpe ratios saved to {sr_by_year_path}")
-
         return sr_by_year
 
     def generate_portfolio(self, delay: int = 0, cut=None) -> None:
-        """
-        Builds the portfolio returns using the chosen tail_percent_list, then saves them
-        along with a summary and a plot.
-
-        One CSV with all columns:
-          Low_1%, High_1%, H-L_1%, Low_5%, High_5%, H-L_5%, ...
-        plus a summary CSV, plus a chart.
-        """
         for weight_type in ["ew", "vw"]:
             pf_name = self._get_portfolio_name(weight_type, delay)
             print(f"Calculating portfolio named '{pf_name}' ...")
@@ -494,10 +388,8 @@ class PortfolioManager:
             pf_data_path = op.join(data_dir, f"pf_data_{pf_name}.csv")
             portfolio_ret.to_csv(pf_data_path)
 
-            # Summaries
             summary_df = self.portfolio_res_summary(portfolio_ret)
 
-            # Turnover
             for p in self.tail_percent_list:
                 row_name = f"Turnover_{int(p*100)}%"
                 summary_df.loc[row_name, ["ret","std","SR"]] = [np.nan, np.nan, turnover_dict[p]]
@@ -511,7 +403,6 @@ class PortfolioManager:
 
             print(f"[INFO] Portfolio '{pf_name}' results saved to:\n  - {pf_data_path}\n  - {smry_path}")
 
-            # Plot
             plots_dir = ut.get_dir(op.join(self.portfolio_dir, "plots"))
             combined_plot_path = os.path.join(plots_dir, f"combined_cumulative_returns_{pf_name}.png")
 
@@ -523,16 +414,12 @@ class PortfolioManager:
             )
             print(f"[INFO] Combined cumulative returns plot saved at {combined_plot_path}")
             
-            # Annual Sharpe
             self.annual_sharpe_ratio(
                 pf_ret=portfolio_ret,
                 weight_type=weight_type
             )
 
     def _get_portfolio_name(self, weight_type: str, delay: int) -> str:
-        """
-        Build a name based on tail_percent_list, weight type, delay, etc.
-        """
         tail_str = "_".join([f"{int(p*100)}p" for p in self.tail_percent_list])
         delay_prefix = "" if delay == 0 else f"{delay}d_delay_"
         custom_ret_suffix = f"_{self.custom_ret}" if self.custom_ret else ""
@@ -555,9 +442,37 @@ class PortfolioManager:
             raise FileNotFoundError(f"Portfolio summary not found at {smry_path}")
         return pd.read_csv(smry_path, index_col=0)
 
-
 def main():
-    pass
+    """
+    Example main entry point:
+      1. Load or build 'signal_df' with columns ['up_prob', 'MarketCap'] indexed by [Date, StockID].
+      2. Create a PortfolioManager instance.
+      3. Generate portfolio.
+    """
+    # This is just an illustrative example.
+    # In your real code, you'd likely do more advanced steps or pass in arguments.
+
+    # Suppose we have a DataFrame 'df_signal' with 'up_prob' and 'MarketCap' already.
+    # For demonstration, let's pretend df_signal is read from somewhere:
+    df_signal = pd.DataFrame({
+        "Date": pd.date_range("2015-01-01", periods=10, freq="W-FRI"),
+        "StockID": ["AAPL"]*10,
+        "up_prob": np.linspace(0.3, 0.9, 10),
+        "MarketCap": np.random.randint(1e7, 2e7, size=10)  # just a random range
+    })
+    df_signal.set_index(["Date","StockID"], inplace=True)
+
+    # Our portfolio manager:
+    pm = PortfolioManager(
+        signal_df=df_signal,
+        freq="week",
+        portfolio_dir="./example_portfolio_dir",
+        start_year=2015,
+        end_year=2015,
+        country="USA"
+    )
+    # Now let's generate the portfolio
+    pm.generate_portfolio()
 
 if __name__ == "__main__":
     main()

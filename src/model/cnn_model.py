@@ -128,7 +128,7 @@ class Model:
 
     def _get_full_model_name(self) -> str:
         arch = f"D{self.ws}L{self.layer_number}"
-        vb_suffix = "_vb__2021" if self.volume_bar else ""
+        vb_suffix = "_vb__2011" if self.volume_bar else ""
         return arch + vb_suffix
 
     def init_model(self, device=None, state_dict=None) -> nn.Module:
