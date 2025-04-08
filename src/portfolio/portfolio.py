@@ -192,7 +192,11 @@ class PortfolioManager:
 
         def keep_top_60_percent_dailydollarvolume(group: pd.DataFrame) -> pd.DataFrame:
             group = group.sort_values("DollarVolume", ascending=False)
-            keep_n = int(len(group) * 0.6)  # keep top 60% by DollarVolume
+            keep_n = int(len(group) * 0.53)  # keep top 60% by DollarVolume
+            
+            # Print what is the cutoff, the dollarvolume cutoff.
+            print(f"[INFO] DollarVolume cutoff: {group.iloc[keep_n]['DollarVolume']:.2f}")
+            
             return group.iloc[:keep_n]
 
         df_reset = merged_df.reset_index()
@@ -351,6 +355,7 @@ class PortfolioManager:
         }, index=dates)
 
         avg_turn = np.mean(turnover)
+        print(f"[INFO] Average turnover for {low_name}, {high_name}, {ls_name}: {avg_turn:.4f}")
         return daily_ret_df, avg_turn
 
 
